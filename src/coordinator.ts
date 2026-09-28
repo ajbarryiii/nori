@@ -47,8 +47,9 @@ export class Coordinator {
         const reminder = this.target(action.id);
         if (!reminder) return "Which reminder? Reply ‘done #1’ or ‘snooze #1 20m’ with its number. ‘List’ shows your tasks.";
         if (action.kind === "done") { this.store.complete(reminder.id); return `Completed #${reminder.id}: ${reminder.title}.`; }
-        this.store.snooze(reminder.id, this.clock() + action.minutes * 60_000);
-        return `Snoozed #${reminder.id} for ${action.minutes} minutes. Its original deadline is unchanged.`;
+        const nextAt = message.sentAt + action.minutes * 60_000;
+        this.store.snooze(reminder.id, nextAt);
+        return `Snoozed #${reminder.id} until ${formatTime(nextAt, this.config.timezone)}. Its original deadline is unchanged.`;
       }
       case "cancel": return this.store.cancelJob(action.id) ? `Cancelled job #${action.id}.` : `No queued job #${action.id} to cancel.`;
       case "pause": this.store.setSetting("pause", action.scope); return action.scope === "all"
@@ -104,8 +105,10 @@ export class Coordinator {
     } finally { this.sending = false; }
   }
 
-  async routeJobs(router: IntentRouter): Promise<void> {
-    for (const job of this.store.unroutedJobs().slice(0, 5)) {
+  async routeJobs(router: IntentRouter, shouldContinue: () => boolean = () => true): Promise<void> {
+    for (let n = 0; n < 5 && shouldContinue(); n++) {
+      const job = this.store.claimUnroutedJob();
+      if (!job) break;
       let route = null;
       try { route = await router.classify(job.text, this.config.timezone); } catch { /* Task stays queued. */ }
       this.store.saveRoute(job.id, route);

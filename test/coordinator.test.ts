@@ -178,3 +178,44 @@ test("router failure cannot lose or fail the queued job", async t => {
   await core.routeJobs({ classify: async () => { throw new Error("offline"); } });
   assert.equal(store.jobs()[0]?.status, "queued");
 });
+
+test("catch-up snoozes use the command timestamp and can already be due", async t => {
+  const { core, store, transport, advance } = setup(t);
+  advance(60 * 60_000);
+  core.acceptPage(page([message("remind me to stretch in 1 minute"),
+    message("snooze #1 20m", 2, { sentAt: epoch + 5 * 60_000 })]));
+  assert.equal(store.reminders()[0]?.dueAt, epoch + 60_000);
+  assert.equal(store.reminders()[0]?.nextAt, epoch + 25 * 60_000);
+  await core.tick();
+  assert.equal(transport.sent.filter(text => text.startsWith("Reminder")).length, 1);
+});
+
+test("cancelling a job while earlier advice is pending prevents its model call", async t => {
+  const { core, store } = setup(t);
+  core.acceptPage(page([message("research a laptop"), message("research a phone", 2)]));
+  const calls: string[] = [];
+  await core.routeJobs({ classify: async text => {
+    calls.push(text);
+    core.acceptPage(page([message("cancel job #2", 3)]));
+    return null;
+  } });
+  assert.deepEqual(calls, ["research a laptop"]);
+  assert.equal(store.jobs()[1]?.status, "cancelled");
+});
+
+test("advisory attempt is durable before the model call finishes", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "nori-route-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "state.sqlite");
+  const { core, store } = setup(t, path);
+  core.acceptPage(page([message("research a laptop")]));
+  let unclaimed: number | undefined;
+  await core.routeJobs({ classify: async () => {
+    const reopened = new Store(path);
+    try { unclaimed = reopened.unroutedJobs().length; } finally { reopened.close(); }
+    throw new Error("Response lost after dispatch");
+  } });
+  assert.equal(unclaimed, 0);
+  assert.equal(store.jobs()[0]?.status, "queued");
+  assert.equal(store.unroutedJobs().length, 0);
+});

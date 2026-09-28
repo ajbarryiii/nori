@@ -61,3 +61,11 @@ test("overnight quiet hours respect local time", () => {
   assert.equal(inQuietHours(epoch, "America/Los_Angeles", { start: 22, end: 8 }), false);
   assert.equal(inQuietHours(epoch, "America/Los_Angeles", null), false);
 });
+
+test("compound note and remember requests are delegated intact", () => {
+  for (const text of ["note buy milk; remind me to call in 5 minutes",
+    "remember buy milk\nremind me to call in 5 minutes",
+    "note buy milk and also research a laptop"])
+    assert.deepEqual(parse(text), { kind: "delegate" }, text);
+  assert.deepEqual(parse("note buy bread and milk"), { kind: "note", title: "buy bread and milk" });
+});

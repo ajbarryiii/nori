@@ -48,12 +48,23 @@ export async function runService(options: { config: Config; store: Store; transp
   const wait = options.wait ?? (async (ms, signal) => { await delay(ms, undefined, { signal }); });
   let caughtUp = false; let stopped = false; let failure: unknown;
   let sending: Promise<void> | null = null; let routing: Promise<void> | null = null;
+  const canDispatch = () => !stopped && !signal.aborted && caughtUp && !failure;
   const guarded: MessageTransport = {
     readiness: () => transport.readiness(), readAfter: cursor => transport.readAfter(cursor), close: () => transport.close(),
     send: async text => {
-      if (stopped || signal.aborted || !caughtUp) return { status: "not_started", reason: "Service paused before dispatch" };
-      try { checkIdentity(); } catch (error) { failure = error; throw error; }
-      return transport.send(text);
+      if (!canDispatch()) return { status: "not_started", reason: "Service paused before dispatch" };
+      try { checkIdentity(); } catch (error) {
+        failure = error;
+        return { status: "not_started", reason: "Identity check failed before dispatch" };
+      }
+      try {
+        const result = await transport.send(text);
+        if (result.status === "uncertain") failure = new Error("Transport send outcome is uncertain. Review delivery before restarting.");
+        return result;
+      } catch {
+        failure = new Error("Transport send failed without a confirmed result. Review delivery before restarting.");
+        return { status: "uncertain", reason: "Transport ended without a confirmed send result" };
+      }
     },
   };
   const core = new Coordinator(config, store, guarded);
@@ -67,7 +78,7 @@ export async function runService(options: { config: Config; store: Store; transp
       caughtUp = await catchUp(store, core, transport, checkIdentity);
       if (caughtUp && !signal.aborted && !failure) {
         sending ??= core.tick().catch(error => { failure = error; }).finally(() => { sending = null; });
-        if (router) routing ??= core.routeJobs(router).catch(error => { failure = error; }).finally(() => { routing = null; });
+        if (router) routing ??= core.routeJobs(router, canDispatch).catch(error => { failure = error; }).finally(() => { routing = null; });
       }
       await wait(config.pollMs, signal);
     }

@@ -18,10 +18,10 @@ export function parseAction(input: string, sentAt: number, timezone: string): Ac
   const snooze = /^snooze\s+(?:#(\d+)\s+)?(\d+)\s*(m|min|mins|minute|minutes)$/i.exec(text);
   if (snooze && Number(snooze[2]) > 0 && Number(snooze[2]) <= 10080 && (!snooze[1] || validId(snooze[1])))
     return { kind: "snooze", id: snooze[1] ? Number(snooze[1]) : null, minutes: Number(snooze[2]) };
+  // Conservative detection avoids treating a second instruction as part of a task title.
+  if (/\b(?:and also|and then|also research|also email|also send)\b|[\r\n;]/i.test(text)) return { kind: "delegate" };
   const note = /^(?:note|remember)\s+(.+)$/is.exec(text);
   if (note?.[1]?.trim()) return { kind: "note", title: note[1].trim() };
-  // Conservative detection avoids treating a second instruction as part of a reminder title.
-  if (/\b(?:and also|and then|also research|also email|also send)\b|[\r\n;]/i.test(text)) return { kind: "delegate" };
   const relative = /^remind me to (.+?) in (\d+)\s*(minutes?|mins?|m|hours?|h|days?|d)$/i.exec(text);
   if (relative) {
     const amount = Number(relative[2]);

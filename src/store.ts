@@ -89,6 +89,14 @@ export class Store {
     const pending = new Set(this.db.prepare("SELECT id FROM jobs WHERE status='queued' AND route_attempted=0").all().map(x => Number(x.id)));
     return this.jobs().filter(x => pending.has(x.id));
   }
+  claimUnroutedJob(): Job | null {
+    return this.transaction(() => {
+      const job = this.unroutedJobs()[0];
+      if (!job) return null;
+      this.db.prepare("UPDATE jobs SET route_attempted=1 WHERE id=?").run(job.id);
+      return job;
+    });
+  }
   saveRoute(id: number, route: RoutingDecision | null): void {
     this.db.prepare("UPDATE jobs SET route=?,route_attempted=1 WHERE id=? AND status='queued'").run(route ? JSON.stringify(route) : null, id);
   }

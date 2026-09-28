@@ -94,3 +94,60 @@ test("service closes and sends nothing if database identity no longer matches", 
     signal: new AbortController().signal, wait: async () => {} }), /identity/);
   assert.ok(closed); assert.equal(transport.sent.length, 0);
 });
+
+for (const transient of [false, true]) {
+  test(`pre-dispatch identity failure preserves pending messages and halts the batch (transient=${transient})`, async t => {
+    const store = new Store(":memory:"); t.after(() => store.close()); store.enroll("db", 0);
+    const transport = new FakeTransport();
+    new Coordinator(config, store, transport, () => epoch).acceptPage(page([
+      message("note first"), message("note second", 2), message("note third", 3),
+    ]));
+    let checks = 0;
+    const checkIdentity = () => {
+      checks++;
+      if (checks === 3 || (!transient && checks > 3)) throw new Error("identity changed");
+    };
+    await assert.rejects(runService({ config, store, transport, checkIdentity,
+      signal: new AbortController().signal,
+      wait: async () => { await new Promise<void>(resolve => setImmediate(resolve)); } }), /identity/);
+    assert.deepEqual(transport.sent, []);
+    assert.deepEqual(store.outbox().map(item => item.status), ["pending", "pending", "pending"]);
+  });
+}
+
+test("shutdown during advisory routing leaves later jobs unattempted", async t => {
+  const store = new Store(":memory:"); t.after(() => store.close()); store.enroll("db", 0);
+  const transport = new FakeTransport(); const controller = new AbortController();
+  new Coordinator(config, store, transport, () => epoch).acceptPage(page([
+    message("research a laptop"), message("research a phone", 2),
+  ]));
+  const calls: string[] = [];
+  await runService({ config, store, transport, checkIdentity: () => {}, signal: controller.signal,
+    router: { classify: async text => { calls.push(text); controller.abort(); return null; } },
+    wait: async () => {} });
+  assert.deepEqual(calls, ["research a laptop"]);
+  assert.deepEqual(store.unroutedJobs().map(job => job.id), [2]);
+});
+
+for (const throws of [false, true]) {
+  test(`service halts after an uncertain send without draining the pending batch (throws=${throws})`, async t => {
+    const store = new Store(":memory:"); t.after(() => store.close()); store.enroll("db", 0);
+    const transport = new FakeTransport(); const controller = new AbortController();
+    new Coordinator(config, store, transport, () => epoch).acceptPage(page([
+      message("note first"), message("note second", 2), message("note third", 3),
+    ]));
+    transport.send = async text => {
+      transport.sent.push(text);
+      if (throws) throw new Error("Connection lost");
+      return { status: "uncertain", reason: "Delivery unknown" };
+    };
+    let polls = 0;
+    await assert.rejects(runService({ config, store, transport, checkIdentity: () => {}, signal: controller.signal,
+      wait: async () => {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        if (++polls === 2) controller.abort();
+      } }), /send|transport/i);
+    assert.equal(transport.sent.length, 1);
+    assert.deepEqual(store.outbox().map(item => item.status), ["uncertain", "pending", "pending"]);
+  });
+}
