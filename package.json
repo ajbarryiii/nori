@@ -1,0 +1,26 @@
+{
+  "name": "nori",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An iMessage task coordinator with dependable reminders and delegated work.",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "node --import tsx src/cli.ts",
+    "demo": "node --import tsx src/cli.ts demo",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@js-temporal/polyfill": "0.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}
