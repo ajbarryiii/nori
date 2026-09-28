@@ -1,24 +1,25 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Config, MessageTransport } from "./contracts.js";
-import { Coordinator } from "./coordinator.js";
+import type { Config, Contact, MessageTransport } from "./contracts.js";
+import { Engine } from "./engine.js";
 import { Store } from "./store.js";
 
 export async function demo(): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "nori-demo-"));
-  const config: Config = { assistantUser: "receipts", dataDir, imsgPath: "/unused/demo", pollMs: 5000,
-    owner: { handles: ["demo@example.com"], chatId: 1, chatGuid: "iMessage;-;demo@example.com" },
-    timezone: "America/Los_Angeles", quietHours: null, jev: null };
+  const contact: Contact = { id: "demo", name: "Demo", handles: ["demo@example.com"], role: "owner", plugins: ["reminders"],
+    conversation: { chatId: 1, chatGuid: "iMessage;-;demo@example.com" } };
+  const config: Config = { assistantUser: "receipts", dataDir, imsgPath: "/unused/demo", pollMs: 5000, contacts: [contact],
+    timezone: "America/Los_Angeles", quietHours: null, jev: null, runtime: null };
   const store = new Store(join(dataDir, "state.sqlite")); let now = Date.parse("2026-09-28T16:00:00Z"); let id = 0; let sent = 0;
   const transport: MessageTransport = { readiness: async () => ({ ready: true, detail: "Synthetic transport" }),
-    readAfter: async cursor => ({ messages: [], nextCursor: cursor, hasMore: false }), close: () => {},
-    send: async text => { console.log(`Nori: ${text}`); return { status: "sent", messageGuid: `demo-out-${++sent}` }; } };
+    readAfter: async (_conversation, cursor) => ({ messages: [], nextCursor: cursor, hasMore: false }), close: () => {},
+    send: async (_target, text) => { console.log(`Nori: ${text}`); return { status: "sent", messageGuid: `demo-out-${++sent}` }; } };
   try {
-    store.enroll("synthetic-demo", 0); const core = new Coordinator(config, store, transport, () => now);
+    store.enroll("synthetic-demo", contact.id, contact.conversation, 0); const core = new Engine(config, store, transport, { clock: () => now });
     const say = async (text: string) => {
       console.log(`You: ${text}`); id++;
-      core.acceptPage({ messages: [{ guid: `demo-${id}`, rowId: id, chatId: 1, chatGuid: config.owner.chatGuid,
+      core.acceptPage(contact.id, { messages: [{ guid: `demo-${id}`, rowId: id, chatId: 1, chatGuid: contact.conversation.chatGuid,
         sender: "demo@example.com", isFromMe: false, isGroup: false, text, sentAt: now }], nextCursor: id, hasMore: false });
       await core.tick();
     };

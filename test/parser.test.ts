@@ -1,59 +1,45 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseAction, inQuietHours } from "../src/parser.js";
+import { inQuietHours, isCompound, localDay, parseEngineCommand } from "../src/parser.js";
 import { epoch } from "./helpers.js";
 
-const parse = (text: string, at = epoch) => parseAction(text, at, "America/Los_Angeles");
-
-test("simple controls avoid model routing", () => {
-  assert.deepEqual(parse(" DONE #12 "), { kind: "done", id: 12 });
-  assert.deepEqual(parse("snooze 20 minutes"), { kind: "snooze", id: null, minutes: 20 });
-  assert.deepEqual(parse("snooze #2 10m"), { kind: "snooze", id: 2, minutes: 10 });
-  assert.deepEqual(parse("pause all"), { kind: "pause", scope: "all" });
-  assert.deepEqual(parse("pause"), { kind: "pause", scope: "nudges" });
-  assert.deepEqual(parse("resume"), { kind: "resume" });
-  assert.deepEqual(parse("what's happening?"), { kind: "status" });
+test("engine commands are deterministic and need no model", () => {
+  assert.deepEqual(parseEngineCommand("pause all"), { kind: "pause", scope: "all" });
+  assert.deepEqual(parseEngineCommand("pause"), { kind: "pause", scope: "nudges" });
+  assert.deepEqual(parseEngineCommand("resume"), { kind: "resume" });
+  assert.deepEqual(parseEngineCommand("what's happening?"), { kind: "status" });
+  assert.deepEqual(parseEngineCommand(" STATUS "), { kind: "status" });
+  assert.deepEqual(parseEngineCommand("help"), { kind: "help" });
+  assert.deepEqual(parseEngineCommand("stop"), { kind: "stop" });
 });
 
-test("relative reminders use original message time, not catch-up time", () => {
-  assert.deepEqual(parse("remind me to stretch in 20 minutes"),
-    { kind: "remind", title: "stretch", dueAt: epoch + 20 * 60_000 });
+test("cancel accepts the plan's short form and the earlier job form", () => {
+  assert.deepEqual(parseEngineCommand("cancel #3"), { kind: "cancel", id: 3 });
+  assert.deepEqual(parseEngineCommand("cancel job #3"), { kind: "cancel", id: 3 });
+  assert.deepEqual(parseEngineCommand("cancel task 3"), { kind: "cancel", id: 3 });
+  assert.equal(parseEngineCommand("cancel #0"), null);
+  assert.equal(parseEngineCommand("cancel the dentist"), null);
 });
 
-test("calendar reminders resolve in the configured timezone", () => {
-  assert.deepEqual(parse("Remind me to call the dentist tomorrow at 10 am"),
-    { kind: "remind", title: "call the dentist", dueAt: Date.parse("2026-09-29T17:00:00Z") });
-  assert.deepEqual(parse("remind me to stretch on 2026-10-01 at 14:00"),
-    { kind: "remind", title: "stretch", dueAt: Date.parse("2026-10-01T21:00:00Z") });
+test("runtime controls address a job by number", () => {
+  assert.deepEqual(parseEngineCommand("approve #3"), { kind: "approve", id: 3 });
+  assert.deepEqual(parseEngineCommand("Deny"), { kind: "deny", id: null });
+  assert.deepEqual(parseEngineCommand("continue 2"), { kind: "continue", id: 2 });
+  assert.deepEqual(parseEngineCommand("#3 use the cheaper one"), { kind: "followUp", id: 3, text: "use the cheaper one" });
+  assert.deepEqual(parseEngineCommand("#3: also\nthe garage"), { kind: "followUp", id: 3, text: "also\nthe garage" });
+  for (const text of ["#3", "#0 hi", "approve all", "continue working on it"]) assert.equal(parseEngineCommand(text), null, text);
 });
 
-test("nonexistent and ambiguous DST times require clarification", () => {
-  assert.equal(parse("remind me to leave on 2027-03-14 at 2:30 am").kind, "clarify");
-  assert.equal(parse("remind me to leave on 2026-11-01 at 1:30 am").kind, "clarify");
+test("plugin commands and quoted controls are not engine commands", () => {
+  for (const text of ["list", "done #1", "snooze 20m", "note pause all", 'Someone said: "pause all"'])
+    assert.equal(parseEngineCommand(text), null, text);
 });
 
-test("calendar-day offsets do not silently move a reminder through a DST gap or fold", () => {
-  assert.equal(parse("remind me to leave in 1 day", Date.parse("2027-03-13T10:30:00Z")).kind, "clarify");
-  assert.equal(parse("remind me to leave in 1 day", Date.parse("2026-10-31T08:30:00Z")).kind, "clarify");
-});
-
-test("clarification demonstrates a supported complete replacement command", () => {
-  const action = parse("remind me to call tomorrow at 10");
-  assert.equal(action.kind, "clarify");
-  if (action.kind === "clarify") assert.match(action.question, /remind me to .* tomorrow at 10 am/);
-});
-
-test("unclear times and invalid dates do not silently become reminders", () => {
-  for (const text of ["remind me to call tomorrow at 10", "remind me to call on 2026-02-30 at 10 am",
-    "remind me to call in 0 minutes", "remind me to call tomorrow at 25:00"])
-    assert.equal(parse(text).kind, "clarify", text);
-});
-
-test("mixed requests and quoted instructions are delegated intact", () => {
-  for (const text of ['remind me tomorrow and also research a replacement',
-    'remind me to call tomorrow at 10 am and also email Sam',
-    'Someone said: "pause all"', 'find return instructions for this order'])
-    assert.deepEqual(parse(text), { kind: "delegate" });
+test("explicit compound markers keep a second instruction from being truncated", () => {
+  for (const text of ["note buy milk; remind me to call in 5 minutes", "remember buy milk\nremind me to call in 5 minutes",
+    "note buy milk and also research a laptop", "remind me tomorrow and then email Sam"])
+    assert.equal(isCompound(text), true, text);
+  assert.equal(isCompound("note buy bread and milk"), false);
 });
 
 test("overnight quiet hours respect local time", () => {
@@ -62,10 +48,7 @@ test("overnight quiet hours respect local time", () => {
   assert.equal(inQuietHours(epoch, "America/Los_Angeles", null), false);
 });
 
-test("compound note and remember requests are delegated intact", () => {
-  for (const text of ["note buy milk; remind me to call in 5 minutes",
-    "remember buy milk\nremind me to call in 5 minutes",
-    "note buy milk and also research a laptop"])
-    assert.deepEqual(parse(text), { kind: "delegate" }, text);
-  assert.deepEqual(parse("note buy bread and milk"), { kind: "note", title: "buy bread and milk" });
+test("routing budgets use the configured local calendar day", () => {
+  assert.equal(localDay(Date.parse("2026-09-29T05:00:00Z"), "America/Los_Angeles"), "2026-09-28");
+  assert.equal(localDay(Date.parse("2026-09-29T08:00:00Z"), "America/Los_Angeles"), "2026-09-29");
 });

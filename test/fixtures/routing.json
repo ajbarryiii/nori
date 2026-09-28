@@ -1,0 +1,22 @@
+[
+  { "text": "status", "label": "engine", "grammar": true },
+  { "text": "what's happening?", "label": "engine", "grammar": true },
+  { "text": "pause all", "label": "engine", "grammar": true },
+  { "text": "cancel #2", "label": "engine", "grammar": true },
+  { "text": "remind me to stretch in 20 minutes", "label": "reminders", "grammar": true },
+  { "text": "Remind me to call the dentist tomorrow at 10 am", "label": "reminders", "grammar": true },
+  { "text": "remind me to call tomorrow at 10", "label": "reminders", "grammar": true },
+  { "text": "note buy milk", "label": "reminders", "grammar": true },
+  { "text": "snooze #1 10m", "label": "reminders", "grammar": true },
+  { "text": "done", "label": "reminders", "grammar": true },
+  { "text": "list", "label": "reminders", "grammar": true },
+  { "text": "Can you remind me to call mom in 2 hours?", "label": "reminders", "outcome": "completed" },
+  { "text": "please note that the plumber comes Friday", "label": "reminders", "outcome": "completed" },
+  { "text": "could you remind me about the dentist sometime?", "label": "reminders", "outcome": "waiting_contact" },
+  { "text": "research a replacement for my laptop", "label": "runtime", "outcome": "queued" },
+  { "text": "find the return instructions for my last order", "label": "runtime", "outcome": "queued" },
+  { "text": "remind me tomorrow and also research a replacement", "label": "runtime", "multiAction": true, "outcome": "queued" },
+  { "text": "note buy milk; remind me to call in 5 minutes", "label": "reminders", "multiAction": true, "outcome": "queued" },
+  { "text": "actually make that Friday", "label": "continue", "outcome": "queued" },
+  { "text": "can you handle the thing", "label": "clarify", "outcome": "queued" }
+]

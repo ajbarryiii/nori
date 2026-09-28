@@ -14,3 +14,4 @@ nori.config.json
 # Planning notes stay local, per AGENTS.md.
 /docs/PLAN.md
 /docs/ROUTING.md
+/docs/PLUGIN_REFACTOR.md

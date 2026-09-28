@@ -1,20 +1,24 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import type { RpcPort } from "./contracts.js";
+import type { RpcHandlers, RpcPort } from "./contracts.js";
 import { object as record } from "./config.js";
 
 export class RpcError extends Error {
   constructor(readonly code: number, message: string, readonly data: unknown = null) { super(message); }
 }
 
-/** Bounded, fail-closed JSONL subprocess client. Server-initiated requests never grant approval. */
+/**
+ * Bounded, fail-closed JSONL subprocess client. Server-initiated requests are refused unless a handler answers them;
+ * a handler error becomes a generic error response.
+ */
 export class StdioRpc implements RpcPort {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private nextId = 1;
   private buffer = "";
   private closed = false;
-  constructor(private readonly options: { command: string; args: string[]; timeoutMs: number; jsonrpc?: boolean }) {
-    this.child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "pipe"], shell: false });
+  constructor(private readonly options: { command: string; args: string[]; timeoutMs: number; jsonrpc?: boolean;
+    env?: NodeJS.ProcessEnv; handlers?: RpcHandlers }) {
+    this.child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "pipe"], shell: false, ...(options.env ? { env: options.env } : {}) });
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.receive(chunk));
     // Drain diagnostics without copying provider messages or credentials to our logs.
@@ -54,10 +58,9 @@ export class StdioRpc implements RpcPort {
       try { data = record(JSON.parse(line)); } catch { this.close(); return; }
       if (!data) { this.close(); return; }
       if (typeof data.method === "string") {
-        if (typeof data.id === "number" || typeof data.id === "string") {
-          try { this.write({ id: data.id, error: { code: -32601, message: "This client does not handle server requests or approvals." } }); }
-          catch { this.close(); }
-        }
+        const params = record(data.params) ?? {};
+        if (typeof data.id === "number" || typeof data.id === "string") this.answer(data.id, data.method, params);
+        else { try { this.options.handlers?.notification?.(data.method, params); } catch { /* A notification cannot fail the connection. */ } }
         continue;
       }
       if (typeof data.id !== "number") continue;
@@ -71,6 +74,14 @@ export class StdioRpc implements RpcPort {
       else pending.reject(new Error("Malformed RPC response."));
     }
   }
+  private answer(id: number | string, method: string, params: Record<string, unknown>): void {
+    const handler = this.options.handlers?.request;
+    const refuse = (message: string) => { try { this.write({ id, error: { code: -32601, message } }); } catch { this.close(); } };
+    if (!handler) { refuse("This client does not handle server requests or approvals."); return; }
+    handler(method, params).then(
+      result => { if (!this.closed) { try { this.write({ id, result: result ?? null }); } catch { this.close(); } } },
+      () => { if (!this.closed) refuse("Request refused."); });
+  }
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -78,5 +89,6 @@ export class StdioRpc implements RpcPort {
     this.pending.clear(); this.child.stdin.destroy(); this.child.kill("SIGTERM");
     const killTimer = setTimeout(() => { if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill("SIGKILL"); }, 2_000);
     killTimer.unref(); this.child.once("close", () => clearTimeout(killTimer));
+    try { this.options.handlers?.closed?.(); } catch { /* Closing never throws. */ }
   }
 }

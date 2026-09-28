@@ -1,14 +1,20 @@
 {
   "assistantUser": "receipts",
-  "owner": {
-    "handles": ["replace-with-owner@example.com"],
-    "chatId": 0,
-    "chatGuid": "iMessage;-;replace-with-owner@example.com"
-  },
+  "contacts": [
+    {
+      "id": "owner",
+      "name": "Owner",
+      "handles": ["replace-with-owner@example.com"],
+      "conversation": { "chatId": 0, "chatGuid": "iMessage;-;replace-with-owner@example.com" },
+      "role": "owner",
+      "plugins": ["reminders"]
+    }
+  ],
   "timezone": "America/Los_Angeles",
   "dataDir": "/Users/receipts/Library/Application Support/Nori",
   "imsgPath": "/opt/homebrew/bin/imsg",
   "pollMs": 5000,
   "quietHours": { "start": 22, "end": 8 },
-  "jev": null
+  "jev": null,
+  "runtime": null
 }
