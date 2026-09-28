@@ -1,0 +1,14 @@
+{
+  "assistantUser": "receipts",
+  "owner": {
+    "handles": ["replace-with-owner@example.com"],
+    "chatId": 0,
+    "chatGuid": "iMessage;-;replace-with-owner@example.com"
+  },
+  "timezone": "America/Los_Angeles",
+  "dataDir": "/Users/receipts/Library/Application Support/Nori",
+  "imsgPath": "/opt/homebrew/bin/imsg",
+  "pollMs": 5000,
+  "quietHours": { "start": 22, "end": 8 },
+  "jev": null
+}

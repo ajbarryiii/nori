@@ -1,5 +1,11 @@
 .DS_Store
 node_modules/
+dist/
+coverage/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+nori.config.json
 .env
 .env.*
 !.env.example
