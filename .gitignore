@@ -1,0 +1,10 @@
+.DS_Store
+node_modules/
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Planning notes stay local, per AGENTS.md.
+/docs/PLAN.md
+/docs/ROUTING.md
