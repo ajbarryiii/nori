@@ -1,0 +1,192 @@
+#!/usr/bin/env node
+import { createHash, randomUUID } from 'node:crypto';
+import { spawn, spawnSync } from 'node:child_process';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const model = 'gpt-6-astra';
+const effort = 'xhigh';
+const script = fileURLToPath(import.meta.url);
+const resources = join(dirname(script), 'review');
+const promptTemplate = readFileSync(join(resources, 'prompt.md'), 'utf8');
+const schemaPath = join(resources, 'schema.json');
+const digest = value => createHash('sha256').update(value).digest('hex');
+const policy = digest(readFileSync(script) + promptTemplate + readFileSync(schemaPath));
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const nonempty = value => typeof value === 'string' && value.trim().length > 0;
+let childEnv;
+
+function cleanGitEnvironment() {
+  const result = spawnSync('git', ['rev-parse', '--local-env-vars'], { encoding: 'utf8' });
+  if (result.status !== 0) throw new Error('Cannot determine Git hook environment.');
+  const env = { ...process.env };
+  for (const name of result.stdout.trim().split('\n')) delete env[name];
+  return env;
+}
+
+function git(cwd, args, optional = false) {
+  const r = spawnSync('git', args, { cwd, env: childEnv, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  if (r.status !== 0) {
+    if (optional && r.status === 1) return null;
+    throw new Error(`git ${args[0]} failed: ${r.stderr?.trim() || r.error?.message || r.status}`);
+  }
+  return r.stdout.trim();
+}
+function commit(root, ref) {
+  if (!nonempty(ref) || ref.startsWith('-')) throw new Error('Expected a commit reference, not an option.');
+  return git(root, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]);
+}
+function validate(review) {
+  if (!object(review) || typeof review.review_complete !== 'boolean' || !nonempty(review.summary)
+    || !Array.isArray(review.limitations) || !review.limitations.every(x => typeof x === 'string')
+    || !Array.isArray(review.findings) || Object.keys(review).sort().join(',') !== 'findings,limitations,review_complete,summary')
+    throw new Error('Invalid structured review output.');
+  for (const f of review.findings) {
+    if (!object(f) || !['P0', 'P1', 'P2', 'P3'].includes(f.priority)
+      || ![f.title, f.body, f.path].every(nonempty) || !Number.isSafeInteger(f.line) || f.line < 1
+      || Object.keys(f).sort().join(',') !== 'body,line,path,priority,title') throw new Error('Invalid review finding.');
+  }
+  return review;
+}
+function blocked(review) { return review.findings.some(f => f.priority !== 'P3'); }
+function show(report, path, cached = false) {
+  console.log(`${cached ? 'Cached' : 'Completed'} ${model} ${effort} review: ${report.head.slice(0, 12)}`);
+  console.log(report.review.summary);
+  for (const f of report.review.findings) console.log(`[${f.priority}] ${f.path}:${f.line} ${f.title}\n${f.body}`);
+  for (const limitation of report.review.limitations) console.log(`Limitation: ${limitation}`);
+  console.log(`Report: ${path}`);
+}
+function runCodex(command, args, options, timeout) {
+  return new Promise((resolve, reject) => {
+    const { input, ...spawnOptions } = options;
+    const child = spawn(command, args, { ...spawnOptions, detached: true });
+    let failure;
+    const terminate = () => {
+      if (!child.pid) return;
+      try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') failure ??= error; }
+    };
+    const timer = setTimeout(() => { failure = new Error('Astra review timed out.'); terminate(); }, timeout);
+    const interrupt = () => { failure = new Error('Astra review interrupted.'); terminate(); };
+    process.once('SIGINT', interrupt); process.once('SIGTERM', interrupt);
+    const cleanup = () => {
+      clearTimeout(timer); process.removeListener('SIGINT', interrupt); process.removeListener('SIGTERM', interrupt);
+    };
+    child.once('error', error => { cleanup(); reject(error); });
+    child.once('close', (status, signal) => {
+      cleanup();
+      if (failure) reject(failure); else resolve({ status, signal });
+    });
+    child.stdin.on('error', () => { /* A process failure is reported by error/close. */ });
+    child.stdin.end(input);
+  });
+}
+async function reviewCommit(root, base, head, force) {
+  if (git(root, ['rev-parse', `${base}^{tree}`]) === git(root, ['rev-parse', `${head}^{tree}`])) {
+    console.log(`No changed files at ${head.slice(0, 12)}; no review needed.`); return 0;
+  }
+  const cache = resolve(root, git(root, ['rev-parse', '--git-common-dir']), 'nori-review', digest(JSON.stringify({ base, head, policy, model, effort })));
+  mkdirSync(cache, { recursive: true, mode: 0o700 });
+  const lock = join(cache, 'running');
+  try { mkdirSync(lock, { mode: 0o700 }); }
+  catch (error) {
+    if (error.code === 'EEXIST') throw new Error(`Review already running, or a stale review lock exists: ${lock}. See docs/PR_REVIEW.md.`);
+    throw error;
+  }
+  try {
+    writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 });
+    return await reviewLocked(root, base, head, force, cache);
+  } finally { rmSync(lock, { recursive: true, force: true }); }
+}
+async function reviewLocked(root, base, head, force, cache) {
+  const reportPath = join(cache, 'report.json');
+  if (!force && existsSync(reportPath)) {
+    try {
+      const saved = JSON.parse(readFileSync(reportPath, 'utf8'));
+      validate(saved.review);
+      if (saved.base === base && saved.head === head && saved.policy === policy && saved.model === model && saved.effort === effort
+        && saved.review.review_complete && !blocked(saved.review)) { show(saved, reportPath, true); return 0; }
+    } catch { /* Invalid cache entries never authorize a push. */ }
+  }
+  // A failed forced review must not leave a previous passing result reusable.
+  rmSync(reportPath, { force: true });
+  const temporary = mkdtempSync(join(tmpdir(), 'nori-astra-'));
+  const snapshot = join(temporary, 'repo');
+  const output = join(temporary, 'result.json');
+  const logPath = join(cache, `codex-${randomUUID()}.log`);
+  try {
+    git(root, ['-c', 'core.hooksPath=/dev/null', 'clone', '--quiet', '--shared', '--no-checkout', '--', root, snapshot]);
+    git(snapshot, ['-c', 'core.hooksPath=/dev/null', 'checkout', '--quiet', '--detach', head]);
+    const timeout = Number(process.env.NORI_REVIEW_TIMEOUT_SECONDS ?? 1200);
+    if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 86400) throw new Error('NORI_REVIEW_TIMEOUT_SECONDS must be between 0 and 86400.');
+    const prompt = `${promptTemplate}\nBase commit: ${base}\nHead commit: ${head}\nInspect with: git diff --no-ext-diff --no-textconv ${base} ${head} --\n`;
+    console.log(`Reviewing ${head.slice(0, 12)} with ${model} ${effort}. Log: ${logPath}`);
+    const log = openSync(logPath, 'w', 0o600);
+    let result;
+    try {
+      const codex = git(root, ['config', '--get', 'nori.codexPath'], true) || 'codex';
+      result = await runCodex(codex, ['-a', 'never', 'exec', '--ignore-user-config', '--ephemeral',
+        '-m', model, '-c', `model_reasoning_effort="${effort}"`, '--sandbox', 'read-only',
+        '-C', snapshot, '--output-schema', schemaPath, '-o', output, '-'],
+      { cwd: snapshot, env: childEnv, input: prompt, stdio: ['pipe', log, log] }, timeout * 1000);
+    } catch (error) { throw new Error(`Codex review failed: ${error.message} See ${logPath}`);
+    } finally { closeSync(log); }
+    if (result.status !== 0) throw new Error(`Codex review failed (${result.status ?? result.signal}). See ${logPath}`);
+    if (git(snapshot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Reviewer changed the snapshot; refusing its result.');
+    const review = validate(JSON.parse(readFileSync(output, 'utf8')));
+    const report = { base, head, policy, model, effort, createdAt: new Date().toISOString(), review };
+    const pending = join(cache, `report-${randomUUID()}.tmp`);
+    writeFileSync(pending, JSON.stringify(report, null, 2) + '\n', { mode: 0o600 });
+    renameSync(pending, reportPath);
+    show(report, reportPath);
+    if (!review.review_complete) throw new Error('Review is incomplete; the push remains blocked.');
+    if (blocked(review)) {
+      console.error('Push blocked. The original implementation agent must verify findings, fix them, commit, and review again.');
+      return 1;
+    }
+    return 0;
+  } finally { rmSync(temporary, { recursive: true, force: true }); }
+}
+async function main(args) {
+  if (args.length === 1 && args[0] === '--help') { console.log('review-pr.mjs [--base REF] [--head REF] [--force]\nreview-pr.mjs --pre-push REMOTE LOCATION'); return 0; }
+  childEnv = cleanGitEnvironment();
+  const root = git(process.cwd(), ['rev-parse', '--show-toplevel']);
+  const configuredBase = git(root, ['config', '--get', 'nori.reviewBase'], true) || 'origin/main';
+  let baseRef = configuredBase; let headRef = 'HEAD'; let force = false; let push = false;
+  for (let i = 0; i < args.length; i++) {
+    const option = args[i];
+    if (option === '--force') force = true;
+    else if (option === '--base' || option === '--head') {
+      const value = args[++i];
+      if (!value || value.startsWith('-')) throw new Error(`Missing reference after ${option}.`);
+      if (option === '--base') baseRef = value; else headRef = value;
+    } else if (option === '--pre-push' && i === 0 && args.length === 3) { push = true; break; }
+    else throw new Error(`Unknown option: ${option}`);
+  }
+  const scopes = [];
+  if (push) {
+    const input = readFileSync(0, 'utf8').trim();
+    for (const line of input ? input.split('\n') : []) {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length !== 4 || ![fields[1], fields[3]].every(x => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(x)))
+        throw new Error('Malformed pre-push record.');
+      const [, local, remoteRef, remote] = fields;
+      if (/^0+$/.test(local)) continue;
+      const head = commit(root, local);
+      const fullBase = git(root, ['rev-parse', '--symbolic-full-name', '--verify', '--end-of-options', baseRef]);
+      const baseBranch = fullBase.replace(/^refs\/remotes\/[^/]+\//, '').replace(/^refs\/heads\//, '');
+      const base = remoteRef === `refs/heads/${baseBranch}` && !/^0+$/.test(remote)
+        ? commit(root, remote) : git(root, ['merge-base', commit(root, baseRef), head]);
+      scopes.push({ base, head });
+    }
+  } else {
+    const head = commit(root, headRef);
+    scopes.push({ base: git(root, ['merge-base', commit(root, baseRef), head]), head });
+  }
+  let exit = 0;
+  for (const { base, head } of scopes) exit = Math.max(exit, await reviewCommit(root, base, head, force));
+  return exit;
+}
+try { process.exitCode = await main(process.argv.slice(2)); }
+catch (error) { console.error(`Nori review: ${error.message}`); process.exitCode = 2; }

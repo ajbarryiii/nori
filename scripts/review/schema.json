@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["review_complete", "summary", "findings", "limitations"],
+  "properties": {
+    "review_complete": { "type": "boolean" },
+    "summary": { "type": "string" },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["priority", "title", "body", "path", "line"],
+        "properties": {
+          "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "title": { "type": "string" },
+          "body": { "type": "string" },
+          "path": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  }
+}
