@@ -33,6 +33,7 @@ function held(fake: FakeRuntime) {
   fake.turns.push(async e => { events = e; fake.onCancel = () => finish({ status: "interrupted" }); return done; });
   return { finish: (outcome: TurnOutcome) => finish(outcome), events: () => events! };
 }
+const S = "[Sent 2026-09-28T16:00:00.000Z] ";
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 const runtimeConfig: RuntimeConfig = { codexPath: "/usr/local/bin/codex", model: null, workspaceDir: "/tmp/nori-work",
   budget: { minutes: 30, turns: 3, toolCalls: 2, tokens: 1000 }, daily: { tasks: 5, tokens: 5000 }, approvalMinutes: 60 };
@@ -104,11 +105,11 @@ test("a runtime question waits for the contact, and the next reply resumes the s
   await engine.tick();
   engine.acceptPage("owner", page([message("about $1500", 2)]));
   assert.equal(store.tasks().length, 1);
-  assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.input], ["routed", "about $1500"]);
+  assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.input], ["routed", `${S}about $1500`]);
   assert.equal(texts().at(-1), "Thanks — continuing job #1.");
   await engine.runTasks();
   assert.deepEqual(runtime.calls.map(c => [c.kind, c.input, c.threadId]),
-    [["start", "research a laptop", null], ["resume", "about $1500", "thread-1"]]);
+    [["start", "research a laptop", null], ["resume", `${S}about $1500`, "thread-1"]]);
   assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.input], ["completed", null]);
 });
 
@@ -122,7 +123,7 @@ test("with several questions waiting, an unaddressed reply asks which job it is 
   assert.equal(store.tasks().length, 2);
   assert.match(texts().at(-1)!, /Which job is that for\? Reply ‘#1 …’ or ‘#2 …’/);
   engine.acceptPage("owner", page([message("#2 Verizon", 4)]));
-  assert.deepEqual(store.tasks().map(x => [x.state, x.input]), [["waiting_contact", null], ["routed", "Verizon"]]);
+  assert.deepEqual(store.tasks().map(x => [x.state, x.input]), [["waiting_contact", null], ["routed", `${S}Verizon`]]);
 });
 
 test("follow-ups sent before a job starts are part of its first turn", async t => {
@@ -132,7 +133,7 @@ test("follow-ups sent before a job starts are part of its first turn", async t =
   engine.acceptPage("owner", page([message("#1 under $1500", 2)]));
   assert.equal(texts().at(-1), "Added to job #1.");
   await engine.runTasks();
-  assert.deepEqual(runtime.calls.map(c => [c.kind, c.input]), [["start", "research a laptop\nunder $1500"]]);
+  assert.deepEqual(runtime.calls.map(c => [c.kind, c.input]), [["start", `research a laptop\n${S}under $1500`]]);
 });
 
 test("follow-ups for a running job are queued for its next turn", async t => {
@@ -146,10 +147,10 @@ test("follow-ups for a running job are queued for its next turn", async t => {
   assert.deepEqual(texts().slice(-3), ["Added to job #1.", "Added to job #1.", "No open job #9."]);
   turn.finish({ status: "completed", message: "Shortlist ready.", evidence: ["Checked specs"] });
   await run;
-  assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.input], ["routed", "prefer ThinkPads\nunder 3 pounds"]);
+  assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.input], ["routed", `${S}prefer ThinkPads\n${S}under 3 pounds`]);
   assert.equal(texts().at(-1), "Job #1 is done. Shortlist ready.");
   await engine.runTasks();
-  assert.deepEqual(runtime.calls.at(-1)?.input, "prefer ThinkPads\nunder 3 pounds");
+  assert.deepEqual(runtime.calls.at(-1)?.input, `${S}prefer ThinkPads\n${S}under 3 pounds`);
 });
 
 test("an approval round trip holds the turn until the task's own contact decides", async t => {
@@ -510,7 +511,7 @@ test("a question always waits for the contact; input sent during the turn goes w
   engine.acceptPage("owner", page([message("about $1500", 3)]));
   assert.equal(store.tasks().length, 1);
   await engine.runTasks();
-  assert.equal(runtime.calls.at(-1)?.input, "prefer ThinkPads\nabout $1500");
+  assert.equal(runtime.calls.at(-1)?.input, `${S}prefer ThinkPads\n${S}about $1500`);
 });
 
 test("a delegated task without a hint still runs, and a completed outcome without evidence is not done", async t => {
@@ -619,10 +620,10 @@ test("a request stays with the task until the runtime accepts its turn", async t
   runtime.start = async (task, _tools, events) => { runtime.calls.push({ kind: "start", task: task.id, input: task.text, tools: [], threadId: null });
     events.started({ threadId: "thread-1", turnId: null }); throw new Error("turn/start timed out"); };
   await engine.runTasks();
-  assert.deepEqual([store.tasks()[0]?.threadId, store.tasks()[0]?.input], ["thread-1", "research a laptop\nunder $1500"]);
+  assert.deepEqual([store.tasks()[0]?.threadId, store.tasks()[0]?.input], ["thread-1", `research a laptop\n${S}under $1500`]);
   engine.acceptPage("owner", page([message("continue #1", 3)]));
   await engine.runTasks();
-  assert.match(runtime.calls.at(-1)!.input, /interrupted before it finished[\s\S]*research a laptop\nunder \$1500$/);
+  assert.match(runtime.calls.at(-1)!.input, /interrupted before it finished[\s\S]*research a laptop\n\[Sent [^\]]+\] under \$1500$/);
   assert.equal(store.tasks()[0]?.input, null);
 });
 
@@ -672,7 +673,7 @@ test("accepted input is removed once, so a follow-up that repeats it survives", 
   const { done } = await started(engine);
   engine.acceptPage("owner", page([message("#1 research a laptop with a better display", 2)]));
   turn.finish({ status: "completed", message: "ok", evidence: ["x"] }); await done;
-  assert.equal(store.tasks()[0]?.input, "research a laptop with a better display");
+  assert.equal(store.tasks()[0]?.input, `${S}research a laptop with a better display`);
 });
 
 test("unsent approval prompts are withdrawn when the turn ends or Nori restarts", async t => {
@@ -703,7 +704,7 @@ test("a fresh job blocked by the daily limit does not stall jobs that resume exi
   engine.acceptPage("owner", page([message("continue #1", 3), message("#2 Verizon", 4)]));
   assert.deepEqual(store.tasks().map(x => [x.state, x.threadId]), [["routed", null], ["routed", "thread-2"]]);
   await engine.runTasks();
-  assert.deepEqual(runtime.calls.at(-1), { kind: "resume", task: store.tasks()[1]!.id, input: "Verizon", tools: runtime.calls.at(-1)!.tools, threadId: "thread-2" });
+  assert.deepEqual(runtime.calls.at(-1), { kind: "resume", task: store.tasks()[1]!.id, input: `${S}Verizon`, tools: runtime.calls.at(-1)!.tools, threadId: "thread-2" });
 });
 
 test("reaching the token limit exactly still requires continue", async t => {
@@ -728,7 +729,7 @@ test("only a message sent after the question was delivered answers it", async t 
   assert.deepEqual(store.tasks().map(x => x.text), ["research a laptop", "research a phone"]);
   await engine.tick(); advance(60_000);
   engine.acceptPage("owner", page([message("about $1500", 3, { sentAt: epoch + 120_000 })]));
-  assert.equal(store.tasks()[0]?.input, "about $1500");
+  assert.equal(store.tasks()[0]?.input, "[Sent 2026-09-28T16:02:00.000Z] about $1500");
 });
 
 test("cancelling a job withdraws its unsent question", async t => {
@@ -754,7 +755,7 @@ test("an answer written while its question is still being sent answers it", asyn
   const sending = engine.tick(); await flush();
   engine.acceptPage("owner", page([message("about $1500", 2)]));
   release(); await sending;
-  assert.deepEqual(store.tasks().map(x => [x.state, x.input]), [["routed", "about $1500"]]);
+  assert.deepEqual(store.tasks().map(x => [x.state, x.input]), [["routed", `${S}about $1500`]]);
 });
 
 test("a follow-up sent before the job is routed joins its first turn", async t => {
@@ -762,7 +763,7 @@ test("a follow-up sent before the job is routed joins its first turn", async t =
   engine.acceptPage("owner", page([message("research a laptop"), message("#1 under $500", 2)]));
   assert.equal(texts().at(-1), "Added to job #1.");
   await engine.routeTasks(null); await engine.runTasks();
-  assert.match(runtime.calls[0]!.input, /research a laptop\nunder \$500$/);
+  assert.match(runtime.calls[0]!.input, /research a laptop\n\[Sent [^\]]+\] under \$500$/);
 });
 
 test("a budget stop refuses an approval that was already pending", async t => {
@@ -791,7 +792,7 @@ test("a job with a queued follow-up goes to the runtime instead of a plugin rout
   assert.equal(reminders(store).length, 0);
   assert.equal(store.tasks()[0]?.state, "routed");
   await engine.runTasks();
-  assert.match(runtime.calls[0]!.input, /2 hours\?\nmake that 3 hours$/);
+  assert.match(runtime.calls[0]!.input, /2 hours\?\n\[Sent [^\]]+\] make that 3 hours$/);
 });
 
 test("answering a question withdraws it if it has not been delivered yet", async t => {
@@ -804,4 +805,29 @@ test("answering a question withdraws it if it has not been delivered yet", async
   await engine.tick();
   engine.acceptPage("owner", page([message("#1 under $1000", 2)]));
   assert.equal(store.outbox().find(x => x.text.startsWith("Job #1 asks"))?.status, "cancelled");
+});
+
+test("a follow-up sent during a turn that fails starts another turn instead of being stranded", async t => {
+  const { engine, store, runtime, texts } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  const turn = held(runtime);
+  const { done } = await started(engine);
+  engine.acceptPage("owner", page([message("#1 check the manufacturer instead", 2)]));
+  turn.finish({ status: "failed", message: "The review site is down." }); await done;
+  assert.equal(texts().at(-1), "Job #1 couldn't be finished: The review site is down.");
+  assert.equal(store.tasks()[0]?.state, "routed");
+  await engine.runTasks();
+  assert.match(runtime.calls.at(-1)!.input, /check the manufacturer instead$/);
+});
+
+test("follow-ups carry their send time to the runtime", async t => {
+  const { engine, runtime } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async () => ({ status: "needs_input", message: "When?" }));
+  await engine.runTasks(); await engine.tick();
+  engine.acceptPage("owner", page([message("#1 tomorrow at 9 am", 2, { sentAt: Date.parse("2026-09-29T17:00:00Z") })]));
+  await engine.runTasks();
+  assert.equal(runtime.calls.at(-1)!.input, "[Sent 2026-09-29T17:00:00.000Z] tomorrow at 9 am");
 });

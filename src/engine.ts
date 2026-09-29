@@ -108,7 +108,7 @@ export class Engine {
       timer: null, sourceGuid: message.guid };
     const reply = (text: string) => this.enqueue(source, `reply:${message.guid}`, text);
     const command = parseEngineCommand(message.text);
-    if (command) { reply(this.command(contact, command)); return; }
+    if (command) { reply(this.command(contact, command, message.sentAt)); return; }
     // Grammars consume the entire message, so a compound request never reaches one.
     if (!isCompound(message.text)) {
       const context = { contact, time: message.sentAt, timezone: this.config.timezone };
@@ -133,7 +133,7 @@ export class Engine {
         ? this.store.dispatchedAt(`task:${x.id}:turn:${x.usage.turns}:question`) : null;
       return delivered !== null && delivered <= message.sentAt;
     });
-    if (asking.length === 1) { reply(this.followUp(contact, asking[0]!, message.text)); return; }
+    if (asking.length === 1) { reply(this.followUp(contact, asking[0]!, message.text, message.sentAt)); return; }
     if (asking.length > 1) { reply(`Which job is that for? Reply ${asking.map(x => `‘#${x.number} …’`).join(" or ")}.`); return; }
     this.retain(source, message.text, null);
   }
@@ -159,7 +159,7 @@ export class Engine {
   }
   private tell(contact: Contact, key: string, text: string): void { this.enqueue({ contact, now: this.clock() }, key, text); }
 
-  private command(contact: Contact, command: EngineCommand): string {
+  private command(contact: Contact, command: EngineCommand, sentAt: number): string {
     const tasks = () => this.store.tasks(contact.id);
     switch (command.kind) {
       case "cancel": {
@@ -206,7 +206,7 @@ export class Engine {
       }
       case "followUp": {
         const task = tasks().find(x => x.number === command.id);
-        return task ? this.followUp(contact, task, command.text) : `No open job #${command.id}.`;
+        return task ? this.followUp(contact, task, command.text, sentAt) : `No open job #${command.id}.`;
       }
       case "pause": this.store.setSetting(`pause:${contact.id}`, command.scope); return command.scope === "all"
         ? "All Nori reminder messages are paused. Reply ‘resume’ to restart them. Native app alerts are unchanged."
@@ -221,7 +221,9 @@ export class Engine {
   }
 
   /** Adds contact input to an open runtime job. An answer to its question makes it ready to resume. */
-  private followUp(contact: Contact, task: Task, text: string): string {
+  /** Each follow-up keeps its send time, so relative dates in a late answer still resolve correctly. */
+  private followUp(contact: Contact, task: Task, message: string, sentAt: number): string {
+    const text = `[Sent ${new Date(sentAt).toISOString()}] ${message}`;
     const waiting = task.state === "waiting_contact" ? task.waitingFor?.kind : null;
     if (waiting === "question") {
       this.store.cancelOutbox(`task:${task.id}:turn:${task.usage.turns}:question`);
@@ -666,7 +668,8 @@ export class Engine {
           this.tell(contact, key("question"), `Job #${n} asks: ${outcome.message}\nReply to answer it.`);
           return;
         case "failed":
-          this.store.updateTask(task.id, { state: "failed", waitingFor: null, outcome: outcome.message });
+          // A follow-up that arrived during the failed turn gets its own turn rather than being stranded.
+          this.store.updateTask(task.id, { state: next ?? "failed", waitingFor: null, outcome: outcome.message });
           this.tell(contact, key("failed"), `Job #${n} couldn't be finished: ${outcome.message}`);
           return;
         case "interrupted": {
