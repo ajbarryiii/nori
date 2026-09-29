@@ -14,6 +14,7 @@ class FakeRuntime implements Runtime {
   calls: Array<{ kind: "start" | "resume"; task: number; input: string; tools: string[]; threadId: string | null }> = [];
   cancelled: number[] = [];
   onCancel: (() => void) | null = null;
+  halted: string | null = null;
   async start(task: Task, tools: readonly RuntimeTool[], events: RuntimeEvents) { return this.run("start", task, task.text, tools, events); }
   async resume(task: Task, input: string, tools: readonly RuntimeTool[], events: RuntimeEvents) { return this.run("resume", task, input, tools, events); }
   private async run(kind: "start" | "resume", task: Task, input: string, tools: readonly RuntimeTool[], events: RuntimeEvents) {
@@ -281,6 +282,15 @@ test("concurrent calls with the same call id share one approval and one result",
   assert.deepEqual(results, [{ success: true, text: "Sent to sam@example.com." }, { success: true, text: "Sent to sam@example.com." }]);
   const task = store.tasks()[0]!;
   assert.deepEqual([store.toolCalls(task.id).length, task.usage.toolCalls, task.state], [1, 1, "completed"]);
+});
+
+test("a halted runtime starts nothing more", async t => {
+  const { engine, store, runtime } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  runtime.halted = "Codex commands from a closed connection could not be confirmed stopped.";
+  await engine.runTasks();
+  assert.deepEqual([runtime.calls, store.tasks()[0]?.state], [[], "routed"]);
 });
 
 test("reaching a budget pauses the task with a next-decision message, and continue grants more", async t => {

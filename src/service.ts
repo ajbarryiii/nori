@@ -86,6 +86,7 @@ export async function runService(options: { config: Config; store: Store; transp
     store.recoverInFlight();
     core.recoverRuntime();
     while (!signal.aborted && !stopped) {
+      if (runtime?.halted) failure ??= new Error(runtime.halted);
       if (failure) throw failure;
       caughtUp = false;
       caughtUp = await catchUp(store, core, transport, checkIdentity);
@@ -105,4 +106,6 @@ export async function runService(options: { config: Config; store: Store; transp
     await Promise.allSettled([sending, routing, working, closed]);
     store.recoverInFlight();
   }
+  // Even after a requested stop: the operator must check for Codex commands still running before Nori runs again.
+  if (runtime?.halted) throw new Error(runtime.halted);
 }

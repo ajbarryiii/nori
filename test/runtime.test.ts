@@ -165,7 +165,7 @@ test("with a runtime, the service recovers interrupted turns, runs routed jobs, 
   const runtime: Runtime = {
     manifest: { id: "codex", computerUse: "unverified", ownerOnly: true },
     start: async task => { started.push(task.text); controller.abort(); return { status: "completed", message: "Found it.", evidence: ["Checked"] } as TurnOutcome; },
-    resume: async () => ({ status: "interrupted" }), cancel: async () => {}, close: () => { closed++; return released; },
+    resume: async () => ({ status: "interrupted" }), cancel: async () => {}, close: () => { closed++; return released; }, halted: null,
   };
   let finished = false;
   const service = runService({ config: cfg, store, transport, checkIdentity: () => {}, signal: controller.signal, runtime,
@@ -177,4 +177,25 @@ test("with a runtime, the service recovers interrupted turns, runs routed jobs, 
   assert.deepEqual(started, ["research a laptop"]);
   assert.deepEqual(store.tasks().map(x => [x.state, x.waitingFor]), [["waiting_contact", { kind: "interrupted" }], ["completed", null]]);
   assert.ok(closed >= 1);
+});
+
+test("a runtime that halts stops the service with its reason, even during shutdown", async t => {
+  const reason = "Codex commands from a closed connection could not be confirmed stopped.";
+  for (const during of ["run", "shutdown"] as const) {
+    const store = new Store(":memory:"); t.after(() => store.close()); enrollAt(store, undefined, 0, "db");
+    const cfg = { ...config, runtime: { codexPath: "/usr/local/bin/codex", model: null, workspaceDir: "/tmp/nori-work",
+      budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 1_000_000 }, daily: { tasks: 5, tokens: 5_000_000 }, approvalMinutes: 60 } };
+    const transport = new FakeTransport(); const controller = new AbortController(); let ticks = 0;
+    const runtime: Runtime = {
+      manifest: { id: "codex", computerUse: "unverified", ownerOnly: true }, halted: null,
+      start: async () => ({ status: "interrupted" }), resume: async () => ({ status: "interrupted" }), cancel: async () => {},
+      close: async () => { if (during === "shutdown") runtime.halted = reason; },
+    };
+    await assert.rejects(runService({ config: cfg, store, transport, checkIdentity: () => {}, signal: controller.signal, runtime,
+      wait: async () => {
+        await new Promise<void>(resolve => setImmediate(resolve));
+        if (++ticks === 2) { if (during === "run") runtime.halted = reason; else controller.abort(); }
+      } }), /could not be confirmed stopped/, during);
+    assert.ok(ticks <= 4, during);
+  }
 });

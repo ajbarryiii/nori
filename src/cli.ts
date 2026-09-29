@@ -40,7 +40,7 @@ async function main(): Promise<void> {
     finally { rpc.close(); } return;
   }
   const release = acquireLock(config.dataDir);
-  let store: Store | undefined; let transport: ImessageTransport | undefined;
+  let store: Store | undefined; let transport: ImessageTransport | undefined; let runtime: CodexRuntime | undefined;
   try {
     store = new Store(join(config.dataDir, "state.sqlite"));
     if (command === "status") {
@@ -75,7 +75,7 @@ async function main(): Promise<void> {
     if (config.runtime) {
       try { accessSync(config.runtime.codexPath, constants.X_OK); } catch { throw new Error("runtime.codexPath must be an executable Codex CLI."); }
     }
-    const runtime = config.runtime ? new CodexRuntime({ connect: codexConnection(config.runtime.codexPath, codexHome(config.dataDir)),
+    runtime = config.runtime ? new CodexRuntime({ connect: codexConnection(config.runtime.codexPath, codexHome(config.dataDir)),
       model: config.runtime.model, workspaceDir: config.runtime.workspaceDir, timezone: config.timezone }) : undefined;
     const controller = new AbortController(); const stop = () => controller.abort();
     process.once("SIGINT", stop); process.once("SIGTERM", stop);
@@ -84,7 +84,12 @@ async function main(): Promise<void> {
       await runService({ config, store, transport, checkIdentity, signal: controller.signal, ...(runtime ? { runtime } : {}),
         ...(config.jev ? { router: new JevRouter({ key: process.env.TYPESAFE_API_KEY!, ...config.jev }) } : {}) });
     } finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }
-  } finally { transport?.close(); store?.close(); release(); }
+  } finally {
+    transport?.close(); store?.close();
+    // Codex commands may still be running, so the lock stays until the operator has checked (docs/RUNBOOK.md).
+    if (runtime?.halted) console.error(`Nori: kept ${join(config.dataDir, "service.lock")}. Remove it only after confirming no Codex commands are still running.`);
+    else release();
+  }
 }
 
 main().catch(error => {

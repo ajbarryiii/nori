@@ -422,7 +422,7 @@ export class Engine {
    */
   async runTasks(shouldContinue: () => boolean = () => true): Promise<void> {
     const runtime = this.runtime; const limits = this.config.runtime;
-    if (!runtime || !limits || this.active.size || !shouldContinue()) return;
+    if (!runtime || !limits || this.active.size || !shouldContinue() || runtime.halted) return;
     const contacts = this.activeContacts().filter(c => this.runtimeFor(c));
     // The oldest job the daily limits allow: a new job blocked by the task limit does not hold up jobs resuming a thread.
     const task = this.store.tasks().find(x => x.state === "routed" && contacts.some(c => c.id === x.contactId)

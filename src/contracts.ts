@@ -335,8 +335,16 @@ export interface Runtime {
   resume(task: Task, input: string, tools: readonly RuntimeTool[], events: RuntimeEvents): Promise<TurnOutcome>;
   /** Interrupts the task's active turn, if any. */
   cancel(taskId: number): Promise<void>;
-  /** Stops the runtime. Active turns end, and the promise resolves, only once every process it started has exited. */
+  /**
+   * Stops the runtime. Active turns end, and the promise resolves, only once every process it started has exited or the
+   * runtime has halted.
+   */
   close(): Promise<void>;
+  /**
+   * Why the runtime stopped for good: processes it started could not be confirmed stopped. It then starts nothing more,
+   * and the service stops with this reason and keeps its lock until the operator has checked.
+   */
+  halted: string | null;
 }
 
 export interface RpcPort {
@@ -352,10 +360,10 @@ export interface RpcHandlers {
   request?(method: string, params: Record<string, unknown>): Promise<unknown>;
   notification?(method: string, params: Record<string, unknown>): void;
   /**
-   * The connection ended: pending requests have been rejected, and the server has exited along with every process it
-   * started that could still be traced to it.
+   * The connection ended and pending requests have been rejected. `stopped` confirms that the server has exited along
+   * with every process it started that could still be traced to it; it is false when that could not be confirmed.
    */
-  closed?(): void;
+  closed?(stopped: boolean): void;
 }
 
 /** Future native helper: successful writes must return identifiers suitable for read-back. */

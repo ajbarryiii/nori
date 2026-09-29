@@ -102,9 +102,9 @@ function running(pid: number): boolean {
 }
 
 test("closing stops the server and every process it started, even in another session, before reporting it closed", async t => {
-  let reported!: () => void; const closed = new Promise<void>(resolve => { reported = resolve; });
+  let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
   const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,
-    handlers: { closed: () => reported() } });
+    handlers: { closed: stopped => reported(stopped) } });
   const pids = await rpc.request("spawn", {}) as number[];
   t.after(() => { for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ } } });
   assert.deepEqual(pids.map(running), [true, true, true, true]);
@@ -112,8 +112,19 @@ test("closing stops the server and every process it started, even in another ses
   rpc.close();
   await assert.rejects(rpc.request("spawn", {}), /closed/);
   assert.equal(done, false);
-  await closed;
+  assert.equal(await closed, true);
   assert.deepEqual(pids.map(running), [false, false, false, false]);
+});
+
+test("a stop that cannot be confirmed is reported as unconfirmed", async t => {
+  let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
+  const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,
+    processTable: async () => { throw new Error("ps failed"); }, handlers: { closed: stopped => reported(stopped) } });
+  const pids = await rpc.request("spawn", {}) as number[];
+  t.after(() => { for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ } } });
+  rpc.close();
+  assert.equal(await closed, false);
+  assert.equal(running(pids[0]!), false);
 });
 
 test("stdio RPC times out and rejects outstanding requests when child exits", async t => {

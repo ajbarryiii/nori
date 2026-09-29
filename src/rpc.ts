@@ -8,9 +8,11 @@ const run = promisify(execFile);
 const signal = (pid: number, name: NodeJS.Signals) => { try { process.kill(pid, name); } catch { /* Already gone. */ } };
 
 /** Every process's parent and start time. The start time keeps a reused process id from being mistaken for another. */
-async function processTable(): Promise<Map<number, { parent: number; start: string; exited: boolean }>> {
+export type ProcessTable = Map<number, { parent: number; start: string; exited: boolean }>;
+
+async function processTable(): Promise<ProcessTable> {
   const { stdout } = await run("/bin/ps", ["-A", "-o", "pid=,ppid=,stat=,lstart="], { maxBuffer: 16 * 1_048_576 });
-  const table = new Map<number, { parent: number; start: string; exited: boolean }>();
+  const table: ProcessTable = new Map();
   for (const line of stdout.split("\n")) {
     const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
     if (row) table.set(Number(row[1]), { parent: Number(row[2]), exited: row[3]!.startsWith("Z"), start: row[4]! });
@@ -21,14 +23,21 @@ async function processTable(): Promise<Map<number, { parent: number; start: stri
 /**
  * Pauses a process and all its descendants, including those in other sessions, so none can start another process or be
  * orphaned out of reach, then kills them all and waits until none is running. `uncollected` reports whether `root` is
- * still a child this process has not collected, so its id cannot belong to anything else.
+ * still a child this process has not collected, so its id cannot belong to anything else. Returns whether every process
+ * found was confirmed stopped; if the processes cannot be listed, those already found are killed and it returns false.
  */
-async function killTree(root: number, uncollected: () => boolean): Promise<void> {
-  if (!uncollected()) return;
+async function killTree(root: number, uncollected: () => boolean, list: () => Promise<ProcessTable>): Promise<boolean> {
+  if (!uncollected()) return true;
   signal(root, "SIGSTOP");
   const found = new Map<number, string>();
+  try { return await freezeAndKill(root, uncollected, list, found); }
+  catch { for (const pid of found.keys()) if (pid !== root || uncollected()) signal(pid, "SIGKILL"); return false; }
+}
+
+async function freezeAndKill(root: number, uncollected: () => boolean, list: () => Promise<ProcessTable>, found: Map<number, string>):
+  Promise<boolean> {
   for (let round = 0; round < 50; round++) {
-    const table = await processTable();
+    const table = await list();
     const start = table.get(root)?.start;
     if (!uncollected()) found.delete(root);
     else if (start !== undefined && !found.has(root)) found.set(root, start);
@@ -43,7 +52,7 @@ async function killTree(root: number, uncollected: () => boolean): Promise<void>
     if (!added) break;
   }
   for (let round = 0; round < 40 && found.size; round++) {
-    const table = await processTable();
+    const table = await list();
     for (const [pid, start] of found) {
       const entry = table.get(pid);
       if (!entry || entry.start !== start || entry.exited || (pid === root && !uncollected())) found.delete(pid);
@@ -51,6 +60,7 @@ async function killTree(root: number, uncollected: () => boolean): Promise<void>
     }
     if (found.size) await delay(50);
   }
+  return found.size === 0;
 }
 
 export class RpcError extends Error {
@@ -68,8 +78,9 @@ export class StdioRpc implements RpcPort {
   private buffer = "";
   private closed = false;
   private readonly exited: Promise<void>;
+  /** `processTable` lists processes when stopping the server's process tree; it is replaceable for tests. */
   constructor(private readonly options: { command: string; args: string[]; timeoutMs: number; jsonrpc?: boolean;
-    env?: NodeJS.ProcessEnv; handlers?: RpcHandlers }) {
+    env?: NodeJS.ProcessEnv; handlers?: RpcHandlers; processTable?: () => Promise<ProcessTable> }) {
     this.child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "pipe"], shell: false, ...(options.env ? { env: options.env } : {}) });
     this.exited = new Promise(resolve => { this.child.once("exit", () => resolve()); this.child.once("error", () => resolve()); });
     this.child.stdout.setEncoding("utf8");
@@ -137,18 +148,21 @@ export class StdioRpc implements RpcPort {
   }
   /**
    * Rejects pending requests, then stops the server and every process it started, including ones in their own
-   * sessions (Codex runs commands that way), and reports `closed` once they have exited. Processes are found through
-   * the running server: a server that already exited leaves nothing to trace.
+   * sessions (Codex runs commands that way), and reports `closed` once they have exited, or once it is clear that
+   * cannot be confirmed. Processes are found through the running server: a server that already exited leaves nothing
+   * to trace.
    */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("RPC connection closed.")); }
     this.pending.clear(); this.child.stdin.destroy();
-    const report = () => { try { this.options.handlers?.closed?.(); } catch { /* Closing never throws. */ } };
+    const report = (stopped: boolean) => { try { this.options.handlers?.closed?.(stopped); } catch { /* Closing never throws. */ } };
     const pid = this.child.pid; const uncollected = () => this.child.exitCode === null && this.child.signalCode === null;
-    if (pid === undefined || !uncollected()) { report(); return; }
-    void killTree(pid, uncollected).catch(() => { this.child.kill("SIGKILL"); })
-      .then(() => { this.child.kill("SIGKILL"); return this.exited; }).then(report);
+    if (pid === undefined || !uncollected()) { report(true); return; }
+    void killTree(pid, uncollected, this.options.processTable ?? processTable).then(async stopped => {
+      this.child.kill("SIGKILL");
+      return await Promise.race([this.exited.then(() => true), delay(5_000, false, { ref: false })]) && stopped;
+    }).then(report);
   }
 }

@@ -140,6 +140,7 @@ interface Connection { rpc: RpcPort; ready: Promise<void>; loaded: Set<string>; 
 export class CodexRuntime implements Runtime {
   readonly manifest = { id: "codex", computerUse: "unverified", ownerOnly: true } as const;
   private connection: Connection | null = null;
+  halted: string | null = null;
   private readonly turns = new Map<string, ActiveTurn>();
   /** Tasks between start/resume and turn registration. A cancel arriving then stops the turn from starting. */
   private readonly starting = new Map<number, { cancelled: boolean }>();
@@ -256,13 +257,18 @@ export class CodexRuntime implements Runtime {
   private async connect(): Promise<Connection> {
     // A new app-server starts only after the one being closed has stopped, so two jobs' commands never overlap.
     while (this.connection?.closing) await this.connection.done;
+    if (this.halted) throw new Error(this.halted);
     if (this.connection) { await this.connection.ready; return this.connection; }
     let connection: Connection | null = null; let finished!: () => void;
     const done = new Promise<void>(resolve => { finished = resolve; });
     const rpc = this.options.connect({
       request: (method, params) => this.answer(method, params),
       notification: (method, params) => this.notice(method, params),
-      closed: () => { if (connection && this.connection === connection) this.disconnect(); finished(); },
+      closed: stopped => {
+        if (!stopped) this.halted ??= "Codex commands from a closed connection could not be confirmed stopped.";
+        if (connection && this.connection === connection) this.disconnect();
+        finished();
+      },
     });
     const ready = (async () => {
       const response = record(await rpc.request("initialize", { clientInfo: { name: "nori", title: "Nori", version: "0.1.0" },

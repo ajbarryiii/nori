@@ -30,8 +30,8 @@ class FakeCodex implements RpcPort {
   }
   params(method: string) { return this.requests.find(r => r.method === method)!.params; }
   notify(method: string) { this.notes.push(method); }
-  close() { this.closed++; if (!this.holdClose) this.handlers.closed?.(); }
-  finishClose() { this.handlers.closed?.(); }
+  close() { this.closed++; if (!this.holdClose) this.handlers.closed?.(true); }
+  finishClose(stopped = true) { this.handlers.closed?.(stopped); }
   emit(method: string, params: Record<string, unknown>) { this.handlers.notification?.(method, params); }
   ask(method: string, params: Record<string, unknown>) { return this.handlers.request!(method, params); }
   finish(threadId: string, turnId: string, text: string, status = "completed", error: unknown = null) {
@@ -297,6 +297,20 @@ test("closing ends active turns, and resolves, only once Codex's processes have 
   conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
   assert.equal((await next).status, "completed");
   await runtime.close();
+  assert.equal(runtime.halted, null);
+});
+
+test("if Codex's processes cannot be confirmed stopped, the runtime halts and starts nothing more", async t => {
+  const { runtime, connections, conn, events } = setup(t);
+  const active = runtime.start(task(1), [], events); await flush();
+  conn().holdClose = true;
+  const closing = runtime.close();
+  conn().finishClose(false);
+  await assert.rejects(active, /disconnected/); await closing;
+  assert.match(runtime.halted ?? "", /could not be confirmed stopped/);
+  await assert.rejects(runtime.start(task(2), [], events), /could not be confirmed stopped/);
+  await assert.rejects(runtime.resume(task(1, "th-1"), "go on", [], events), /could not be confirmed stopped/);
+  assert.equal(connections.length, 1);
 });
 
 test("Codex's own tool actions are reported as activity; plugin tool calls are not", async t => {
