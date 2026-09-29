@@ -101,6 +101,7 @@ test("a runtime question waits for the contact, and the next reply resumes the s
   await engine.runTasks();
   assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.waitingFor], ["waiting_contact", { kind: "question" }]);
   assert.match(texts().at(-1)!, /^Job #1 asks: What is your budget\?/);
+  await engine.tick();
   engine.acceptPage("owner", page([message("about $1500", 2)]));
   assert.equal(store.tasks().length, 1);
   assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.input], ["routed", "about $1500"]);
@@ -116,7 +117,7 @@ test("with several questions waiting, an unaddressed reply asks which job it is 
   engine.acceptPage("owner", page([message("research a laptop"), message("research a phone", 2)]));
   await engine.routeTasks(null);
   runtime.turns.push(async () => ({ status: "needs_input", message: "Budget?" }), async () => ({ status: "needs_input", message: "Carrier?" }));
-  await engine.runTasks(); await engine.runTasks();
+  await engine.runTasks(); await engine.runTasks(); await engine.tick();
   engine.acceptPage("owner", page([message("the cheaper one", 3)]));
   assert.equal(store.tasks().length, 2);
   assert.match(texts().at(-1)!, /Which job is that for\? Reply ‘#1 …’ or ‘#2 …’/);
@@ -300,7 +301,7 @@ test("time, token, and turn budgets pause the task instead of failing it", async
   await turns.engine.routeTasks(null);
   for (let n = 0; n < 3; n++) turns.runtime.turns.push(async () => ({ status: "needs_input", message: "More?" }));
   for (let n = 0; n < 3; n++) {
-    await turns.engine.runTasks();
+    await turns.engine.runTasks(); await turns.engine.tick();
     turns.engine.acceptPage("owner", page([message("yes", n + 2)]));
   }
   await turns.engine.runTasks();
@@ -504,7 +505,7 @@ test("a question always waits for the contact; input sent during the turn goes w
   const turn = held(runtime);
   const { done } = await started(engine);
   engine.acceptPage("owner", page([message("#1 prefer ThinkPads", 2)]));
-  turn.finish({ status: "needs_input", message: "What is your budget?" }); await done;
+  turn.finish({ status: "needs_input", message: "What is your budget?" }); await done; await engine.tick();
   assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.waitingFor], ["waiting_contact", { kind: "question" }]);
   engine.acceptPage("owner", page([message("about $1500", 3)]));
   assert.equal(store.tasks().length, 1);
@@ -710,9 +711,34 @@ test("reaching the token limit exactly still requires continue", async t => {
   engine.acceptPage("owner", page([message("organize everything")]));
   await engine.routeTasks(null);
   runtime.turns.push(async events => { events.usage(1000); return { status: "needs_input", message: "Which room?" }; });
-  await engine.runTasks();
+  await engine.runTasks(); await engine.tick();
   engine.acceptPage("owner", page([message("kitchen", 2)]));
   await engine.runTasks();
   assert.equal(runtime.calls.length, 1);
   assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "tokens" });
+});
+
+test("only a message sent after the question was delivered answers it", async t => {
+  const { engine, store, runtime, advance } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async () => ({ status: "needs_input", message: "Budget?" }));
+  advance(60_000); await engine.runTasks();
+  engine.acceptPage("owner", page([message("research a phone", 2, { sentAt: epoch + 30_000 })]));
+  assert.deepEqual(store.tasks().map(x => x.text), ["research a laptop", "research a phone"]);
+  await engine.tick(); advance(60_000);
+  engine.acceptPage("owner", page([message("about $1500", 3, { sentAt: epoch + 120_000 })]));
+  assert.equal(store.tasks()[0]?.input, "about $1500");
+});
+
+test("cancelling a job withdraws its unsent question", async t => {
+  const { engine, store, runtime, transport } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async () => ({ status: "needs_input", message: "Budget?" }));
+  await engine.runTasks();
+  engine.acceptPage("owner", page([message("cancel #1", 2)]));
+  await engine.tick();
+  assert.ok(!transport.sent.some(x => x.startsWith("Job #1 asks")));
+  assert.equal(store.outbox().find(x => x.text.startsWith("Job #1 asks"))?.status, "cancelled");
 });

@@ -57,6 +57,8 @@ interface ActiveTurn {
   threadId: string;
   /** File-change items seen in this turn, so approval prompts can name the files. */
   files: Map<string, string[]>;
+  /** Command items seen in this turn, for approval requests that omit the command. */
+  commands: Map<string, { command: string | null; cwd: string | null }>;
   turnId: string | null;
   announced: boolean;
   interruptPending: boolean;
@@ -199,7 +201,7 @@ export class CodexRuntime implements Runtime {
     if (this.turns.has(threadId)) return Promise.reject(new Error("This thread already has an active turn."));
     const cwd = this.workspace(taskId);
     return new Promise<TurnOutcome>((resolve, reject) => {
-      const turn: ActiveTurn = { taskId, threadId, files: new Map(), turnId: null, announced: false, interruptPending: false, message: "", events, resolve, reject };
+      const turn: ActiveTurn = { taskId, threadId, files: new Map(), commands: new Map(), turnId: null, announced: false, interruptPending: false, message: "", events, resolve, reject };
       // Registered before turn/start, because Codex may send requests for the turn before its response arrives.
       this.turns.set(threadId, turn);
       // Pinned on every turn so a local Codex config cannot route approvals to a model or widen the sandbox.
@@ -237,6 +239,8 @@ export class CodexRuntime implements Runtime {
     if (method === "item/started" && typeof item?.type === "string" && NATIVE_TOOLS.has(item.type)) {
       try { turn.events.activity(); } catch { /* Budgets are enforced by the engine. */ }
     }
+    if ((method === "item/started" || method === "item/completed") && item?.type === "commandExecution" && typeof item.id === "string")
+      turn.commands.set(item.id, { command: text(item.command), cwd: text(item.cwd) });
     if (method === "turn/started") { const turnId = text(record(params.turn)?.id); if (turnId) this.announce(turn, turnId); }
     if ((method === "item/started" || method === "item/completed") && item?.type === "fileChange" && typeof item.id === "string" && Array.isArray(item.changes))
       turn.files.set(item.id, item.changes.map(change => {
@@ -266,11 +270,15 @@ export class CodexRuntime implements Runtime {
         // Everything the approval would grant is shown: the command, where it runs, and any extra network or file access.
         const network = record(params.networkApprovalContext); const extra = record(params.additionalPermissions);
         const files = record(extra?.fileSystem); const paths = (value: unknown) => Array.isArray(value) ? value.filter(x => typeof x === "string") : [];
-        const where = [text(params.cwd) && `in ${text(params.cwd)}`, text(network?.host) && `network access to ${text(network?.host)}`,
+        // The request may omit the command; its item has it. An operation that cannot be shown in full is refused.
+        const known = turn.commands.get(text(params.itemId) ?? "");
+        const command = text(params.command) ?? known?.command ?? null; const cwd = text(params.cwd) ?? known?.cwd ?? null;
+        if (!command) return { decision: "decline" };
+        const where = [cwd && `in ${cwd}`, text(network?.host) && `network access to ${text(network?.host)}`,
           record(extra?.network)?.enabled === true && "network access",
           paths(files?.write).length && `write access to ${paths(files?.write).join(", ")}`,
           paths(files?.read).length && `read access to ${paths(files?.read).join(", ")}`, text(params.reason)].filter(Boolean);
-        const detail = `${text(params.command) ?? "a command"}${where.length ? ` (${where.join("; ")})` : ""}`;
+        const detail = `${command}${where.length ? ` (${where.join("; ")})` : ""}`;
         const operation = params.kind === "writeStdin" ? "send input to a running command" : "run a command";
         return { decision: await turn.events.approval({ operation, detail }) ? "accept" : "decline" };
       }

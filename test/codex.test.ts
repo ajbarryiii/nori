@@ -246,3 +246,15 @@ test("a new job tells Codex when the request was sent", async t => {
   conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
   await done;
 });
+
+test("command approvals use the command from its item, and are refused when the command cannot be shown", async t => {
+  const { runtime, conn, events, seen } = setup(t);
+  const done = runtime.start(task(1), [], events); await flush();
+  const ids = { threadId: "th-1", turnId: "tu-1", startedAtMs: 0 };
+  conn().emit("item/started", { ...ids, item: { type: "commandExecution", id: "c1", command: "rm -rf /w/tmp", cwd: "/w", status: "inProgress" } });
+  assert.deepEqual(await conn().ask("item/commandExecution/requestApproval", { ...ids, itemId: "c1", reason: "clean up" }), { decision: "accept" });
+  assert.deepEqual(await conn().ask("item/commandExecution/requestApproval", { ...ids, itemId: "unknown", reason: "clean up" }), { decision: "decline" });
+  assert.deepEqual(seen.approvals, [{ operation: "run a command", detail: "rm -rf /w/tmp (in /w; clean up)" }]);
+  conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
+  await done;
+});

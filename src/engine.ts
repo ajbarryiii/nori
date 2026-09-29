@@ -127,7 +127,12 @@ export class Engine {
       }
     }
     // A reply to the runtime's one open question continues that job. With several open, ask once which.
-    const asking = this.store.tasks(contact.id).filter(x => x.state === "waiting_contact" && x.waitingFor?.kind === "question");
+    // Only a message written after the question was delivered can be its answer.
+    const asking = this.store.tasks(contact.id).filter(x => {
+      const delivered = x.state === "waiting_contact" && x.waitingFor?.kind === "question"
+        ? this.store.sentAt(`task:${x.id}:turn:${x.usage.turns}:question`) : null;
+      return delivered !== null && delivered <= message.sentAt;
+    });
     if (asking.length === 1) { reply(this.followUp(asking[0]!, message.text)); return; }
     if (asking.length > 1) { reply(`Which job is that for? Reply ${asking.map(x => `‘#${x.number} …’`).join(" or ")}.`); return; }
     this.retain(source, message.text, null);
@@ -160,13 +165,14 @@ export class Engine {
       case "cancel": {
         const task = tasks().find(x => x.number === command.id);
         if (!task || !this.store.cancelTask(contact.id, command.id)) return `No open job #${command.id} to cancel.`;
+        this.store.cancelOutboxPrefix(`task:${task.id}:`);
         if (!this.active.has(task.id)) return `Cancelled job #${command.id}.`;
         this.stop(task);
         return `Stopped job #${command.id}. Anything it already did stays done.`;
       }
       case "stop": {
         const running = tasks().filter(x => this.active.has(x.id));
-        for (const task of running) { this.store.cancelTask(contact.id, task.number); this.stop(task); }
+        for (const task of running) { this.store.cancelTask(contact.id, task.number); this.store.cancelOutboxPrefix(`task:${task.id}:`); this.stop(task); }
         return running.length ? `Stopped job ${running.map(x => `#${x.number}`).join(", ")}. Anything it already did stays done.`
           : "Nothing is running right now. Queued jobs stay queued; reply ‘cancel #1’ with a job's number to remove it.";
       }

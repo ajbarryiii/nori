@@ -18,7 +18,11 @@ The installer resolves the repository and hook destination independently of the 
 
 The runner resolves `codex` from PATH. If an IDE or agent has a different PATH from your terminal, configure its absolute executable with `git config --local nori.codexPath /absolute/path/to/codex`. This selects the CLI executable only; the review model and effort remain pinned.
 
-Invoke `$babysit-pr` in Codex or `/babysit-pr` in Claude Code, with the PR number. Use the session that implemented the PR so findings return to the agent with the implementation context. The skill reviews, fixes, pushes, and monitors CI; merging requires authorization for that PR. There are no review-bot checks to wait for.
+Invoke the personal `$babysit-pr` skill in Codex or `/babysit-pr` in Claude Code, with the PR number. Its canonical installation is `~/.codex/skills/babysit-pr`, exposed through user-level skill directories for Codex and Claude Code. It is available across repositories on this machine; it is no longer bundled in Nori. Copy the complete personal skill directory when setting up another machine.
+
+Use the session that implemented the PR so findings return to the agent with the implementation context. The shared skill uses Nori's existing `npm run review` entrypoint and installed hook here; other repositories can use the portable runner bundled with the personal skill. Nori's scripts remain self-contained for developers without the personal skill. The skill reviews, fixes, pushes, and monitors CI; merging requires authorization for that PR. There are no review-bot checks to wait for.
+
+For Nori runtime changes, validate with `npm test`, `npm run typecheck`, and `npm run build`; for review tooling also use `npm run test:review`. Use synthetic tests and the demo; do not start the live messaging service or send messages during review. Follow `AGENTS.md` for contract-first, test-first fixes.
 
 ## Runner contract
 
