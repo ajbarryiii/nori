@@ -662,3 +662,30 @@ test("concurrent high-impact tool calls are charged against the budget when they
   assert.equal(sent, 2);
   assert.deepEqual(results, [true, true, false]);
 });
+
+test("accepted input is removed once, so a follow-up that repeats it survives", async t => {
+  const { engine, store, runtime } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  const turn = held(runtime);
+  const { done } = await started(engine);
+  engine.acceptPage("owner", page([message("#1 research a laptop with a better display", 2)]));
+  turn.finish({ status: "completed", message: "ok", evidence: ["x"] }); await done;
+  assert.equal(store.tasks()[0]?.input, "research a laptop with a better display");
+});
+
+test("unsent approval prompts are withdrawn when the turn ends or Nori restarts", async t => {
+  for (const ending of ["disconnect", "restart"] as const) {
+    const { engine, store, runtime, transport } = setup(t);
+    engine.acceptPage("owner", page([message("check the weather service")]));
+    await engine.routeTasks(null);
+    let fail!: (error: Error) => void;
+    runtime.turns.push(events => new Promise((_resolve, reject) => { fail = reject; void events.approval({ operation: "run a command", detail: "ls" }); }));
+    const { done } = await started(engine);
+    transport.outcomes.push({ status: "not_started", reason: "offline" }, { status: "not_started", reason: "offline" });
+    await engine.tick();
+    if (ending === "disconnect") { fail(new Error("disconnected")); await done; }
+    else new Engine(withRuntime, store, new FakeTransport(), { clock: () => epoch, runtime: new FakeRuntime() }).recoverRuntime();
+    assert.equal(store.outbox().find(x => x.text.includes("needs your OK"))?.status, "cancelled", ending);
+  }
+});

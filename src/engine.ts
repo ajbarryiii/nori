@@ -440,7 +440,7 @@ export class Engine {
       started: ({ threadId, turnId }) => {
         if (!live()) return;
         this.store.updateTask(task.id, { threadId });
-        if (turnId !== null && turn.sent !== null) this.store.consumeInput(task.id, turn.sent);
+        if (turnId !== null && turn.sent !== null) { this.store.consumeInput(task.id, turn.sent); turn.sent = null; }
       },
       approval: async ({ operation, detail }) => this.requestApproval(task.id, contact, turn, operation, detail),
       tool: async call => {
@@ -613,7 +613,7 @@ export class Engine {
     this.commit(() => {
       if (turn.since !== null) this.stopClock(turn);
       for (const approval of this.store.approvals(contact.id))
-        if (approval.taskId === turn.taskId && approval.status === "pending") this.store.settleApproval(approval.id, "denied");
+        if (approval.taskId === turn.taskId && approval.status === "pending") this.settle(approval, "denied");
       if (outcome.status !== "interrupted" && turn.sent !== null) this.store.consumeInput(turn.taskId, turn.sent);
       const task = this.store.task(turn.taskId);
       if (!task || task.state === "cancelled") return;
@@ -668,7 +668,7 @@ export class Engine {
   recoverRuntime(): void {
     if (this.active.size) throw new Error("Recover runtime state only before starting turns.");
     this.commit(() => {
-      for (const approval of this.store.approvals()) if (approval.status === "pending") this.store.settleApproval(approval.id, "expired");
+      for (const approval of this.store.approvals()) if (approval.status === "pending") this.settle(approval, "expired");
       for (const task of this.store.tasks()) {
         if (!(task.state === "running" || (task.state === "waiting_contact" && task.waitingFor?.kind === "approval"))) continue;
         this.store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "interrupted" } });
