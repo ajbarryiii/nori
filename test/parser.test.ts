@@ -22,8 +22,10 @@ test("cancel accepts the plan's short form and the earlier job form", () => {
 });
 
 test("runtime controls address a job by number", () => {
-  assert.deepEqual(parseEngineCommand("approve #3"), { kind: "approve", id: 3 });
-  assert.deepEqual(parseEngineCommand("Deny"), { kind: "deny", id: null });
+  assert.deepEqual(parseEngineCommand("approve A12"), { kind: "approve", code: 12 });
+  assert.deepEqual(parseEngineCommand("deny a3"), { kind: "deny", code: 3 });
+  assert.deepEqual(parseEngineCommand("Deny"), { kind: "deny", code: null });
+  assert.deepEqual(parseEngineCommand("approve #3"), { kind: "approve", code: null });
   assert.deepEqual(parseEngineCommand("continue 2"), { kind: "continue", id: 2 });
   assert.deepEqual(parseEngineCommand("#3 use the cheaper one"), { kind: "followUp", id: 3, text: "use the cheaper one" });
   assert.deepEqual(parseEngineCommand("#3: also\nthe garage"), { kind: "followUp", id: 3, text: "also\nthe garage" });

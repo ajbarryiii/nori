@@ -118,7 +118,7 @@ export class CodexRuntime implements Runtime {
 
   /** Reports the thread as soon as it exists, before any turn, so a failed start can still be resumed rather than repeated. */
   private persist(events: RuntimeEvents, threadId: string): void {
-    try { events.started({ threadId, turnId: null }); } catch { /* Persisting ids is best effort here. */ }
+    events.started({ threadId, turnId: null });
   }
 
   private begin(taskId: number): { cancelled: boolean } {

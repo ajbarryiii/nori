@@ -128,9 +128,15 @@ export const reminders: ActionPlugin = {
         return;
       }
       case "list": {
-        const items = active(ctx);
-        ctx.reply(items.length ? [`${items.length} active tasks:`, ...items.slice(0, 10).map(x => `#${x.id}: ${x.title}`),
-          ...(items.length > 10 ? [`Plus ${items.length - 10} more.`] : [])].join("\n") : "No active tasks.");
+        // Titles are shortened and the list capped so it always fits in one message.
+        const items = active(ctx); const lines = [`${items.length} active tasks:`]; let shown = 0;
+        for (const item of items.slice(0, 10)) {
+          const line = `#${item.id}: ${item.title.length > 150 ? `${item.title.slice(0, 149)}…` : item.title}`;
+          if (lines.join("\n").length + line.length > 1800) break;
+          lines.push(line); shown++;
+        }
+        if (items.length > shown) lines.push(`Plus ${items.length - shown} more.`);
+        ctx.reply(items.length ? lines.join("\n") : "No active tasks.");
       }
     }
   },

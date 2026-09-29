@@ -267,6 +267,16 @@ export class Store {
     return rows.map(row => ({ id: Number(row.id), taskId: Number(row.task_id), contactId: String(row.contact_id), operation: String(row.operation),
       detail: String(row.detail), status: row.status as ApprovalRecord["status"], createdAt: Number(row.created_at), expiresAt: Number(row.expires_at) }));
   }
+  /** Withdraws an unsent message, for example a prompt that can no longer be answered. */
+  cancelOutbox(key: string): void {
+    this.db.prepare("UPDATE outbox SET status='cancelled' WHERE dedup_key=? AND status='pending'").run(key);
+  }
+  /** Removes input the runtime has accepted, keeping anything added since it was sent. */
+  consumeInput(id: number, sent: string): void {
+    const input = this.task(id)?.input;
+    if (input === null || input === undefined || !input.startsWith(sent)) return;
+    this.updateTask(id, { input: input.slice(sent.length).replace(/^\n/, "") || null });
+  }
   /** Settles a pending approval once. */
   settleApproval(id: number, status: "approved" | "denied" | "expired"): boolean {
     return this.db.prepare("UPDATE approvals SET status=? WHERE id=? AND status='pending'").run(status, id).changes > 0;

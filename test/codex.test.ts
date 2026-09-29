@@ -229,3 +229,9 @@ test("Codex's own tool actions are reported as activity; plugin tool calls are n
   conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
   await done;
 });
+
+test("a thread id that cannot be saved stops the turn from starting", async t => {
+  const { runtime, conn, events } = setup(t);
+  await assert.rejects(runtime.start(task(1), [], { ...events, started: () => { throw new Error("disk full"); } }), /disk full/);
+  assert.ok(!conn().requests.some(r => r.method === "turn/start"));
+});

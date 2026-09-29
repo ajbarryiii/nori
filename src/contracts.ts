@@ -226,7 +226,7 @@ export type WaitingFor =
   | { kind: "clarification" }
   /** The runtime asked a question; the contact's next reply continues the task. */
   | { kind: "question" }
-  /** The active turn is blocked on `approve #n` or `deny #n`. */
+  /** The active turn is blocked on `approve A<code>` or `deny A<code>`. */
   | { kind: "approval" }
   /** A budget was reached; `continue #n` grants another allowance. */
   | { kind: "limit"; limit: keyof Budget }

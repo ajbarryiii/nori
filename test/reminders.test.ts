@@ -181,3 +181,12 @@ test("catch-up snoozes use the command timestamp and can already be due", async 
   await engine.tick();
   assert.equal(transport.sent.filter(text => text.startsWith("Reminder")).length, 1);
 });
+
+test("list stays within one message even with very long notes", t => {
+  const { engine, store } = setup(t);
+  engine.acceptPage("owner", page([1, 2, 3].map(n => message(`note ${String(n).repeat(3400)}`, n)).concat(message("list", 4))));
+  const reply = store.outbox().at(-1)!.text;
+  assert.match(reply, /^3 active tasks:/);
+  assert.ok(reply.length <= 2000);
+  assert.equal(store.tasks().length, 0);
+});

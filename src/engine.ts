@@ -24,8 +24,10 @@ interface ActiveTurn {
   approvals: Map<number, (approved: boolean) => void>;
   /** Set when the engine interrupts the turn for a budget. The turn gets no further approvals or tools. */
   limit: WaitingFor | null;
-  /** Serializes approvals so a job has at most one pending, and `approve #n` is never ambiguous. */
+  /** Serializes approvals so a job has at most one pending. */
   gate: Promise<void>;
+  /** Input sent with this turn; removed from the task once the runtime accepts or finishes the turn. */
+  sent: string | null;
 }
 
 /**
@@ -106,7 +108,7 @@ export class Engine {
       timer: null, sourceGuid: message.guid };
     const reply = (text: string) => this.enqueue(source, `reply:${message.guid}`, text);
     const command = parseEngineCommand(message.text);
-    if (command) { reply(this.command(contact, command, message.sentAt)); return; }
+    if (command) { reply(this.command(contact, command)); return; }
     // Grammars consume the entire message, so a compound request never reaches one.
     if (!isCompound(message.text)) {
       const context = { contact, time: message.sentAt, timezone: this.config.timezone };
@@ -152,8 +154,7 @@ export class Engine {
   }
   private tell(contact: Contact, key: string, text: string): void { this.enqueue({ contact, now: this.clock() }, key, text); }
 
-  /** `sentAt` is when the contact wrote the command; consent covers only approvals that existed then. */
-  private command(contact: Contact, command: EngineCommand, sentAt: number): string {
+  private command(contact: Contact, command: EngineCommand): string {
     const tasks = () => this.store.tasks(contact.id);
     switch (command.kind) {
       case "cancel": {
@@ -170,21 +171,21 @@ export class Engine {
           : "Nothing is running right now. Queued jobs stay queued; reply ‘cancel #1’ with a job's number to remove it.";
       }
       case "approve": case "deny": {
-        // An overdue approval is refused even if no tick has expired it yet.
+        // Each prompt carries its approval's code, so a reply can only ever decide the request it answers.
+        const mine = this.store.approvals(contact.id);
         const number = (approval: ApprovalRecord) => this.store.task(approval.taskId)!.number;
-        const overdue = this.store.approvals(contact.id).filter(x => x.status === "pending" && x.expiresAt <= this.clock());
-        for (const approval of overdue) this.settle(approval, "expired");
-        const pending = this.store.approvals(contact.id).filter(x => x.status === "pending" && x.createdAt <= sentAt)
-          .map(approval => ({ approval, number: number(approval) }))
-          .filter(x => command.id === null || x.number === command.id);
-        if (command.id === null && new Set(pending.map(x => x.number)).size > 1)
-          return `Several jobs are waiting for approval. Reply ‘${command.kind} #n’ with the job number.`;
-        const first = pending[0];
-        const lapsed = overdue.map(number).filter(n => command.id === null || n === command.id);
-        if (!first && lapsed.length === 1) return `The approval for job #${lapsed[0]} expired, so it was refused.`;
-        if (!first) return command.id === null ? "No approval is pending." : `No approval is pending for job #${command.id}.`;
-        this.settle(first.approval, command.kind === "approve" ? "approved" : "denied");
-        return `${command.kind === "approve" ? "Approved" : "Denied"} for job #${first.number}.`;
+        if (command.code === null) {
+          const pending = mine.filter(x => x.status === "pending");
+          if (pending.length === 1) return `Reply with the code from the request: ‘approve A${pending[0]!.id}’ or ‘deny A${pending[0]!.id}’.`;
+          return pending.length ? `Reply with the code from the request, for example ‘${command.kind} A${pending[0]!.id}’.` : "No approval is pending.";
+        }
+        const approval = mine.find(x => x.id === command.code);
+        if (approval?.status === "pending" && approval.expiresAt <= this.clock()) this.settle(approval, "expired");
+        const current = approval && this.store.approvals(contact.id).find(x => x.id === approval.id)!;
+        if (current?.status === "expired") return `The approval for job #${number(current)} expired, so it was refused.`;
+        if (!current || current.status !== "pending") return `Approval A${command.code} is not pending.`;
+        this.settle(current, command.kind === "approve" ? "approved" : "denied");
+        return `${command.kind === "approve" ? "Approved" : "Denied"} A${current.id} for job #${number(current)}.`;
       }
       case "continue": {
         const paused = tasks().filter(x => x.state === "waiting_contact" && (x.waitingFor?.kind === "limit" || x.waitingFor?.kind === "interrupted")
@@ -233,7 +234,12 @@ export class Engine {
   /** Called inside a transaction after the task is cancelled: refuses its approvals and interrupts its turn. */
   private stop(task: Task): void {
     for (const approval of this.store.approvals(task.contactId)) if (approval.taskId === task.id && approval.status === "pending") this.settle(approval, "denied");
-    this.later(() => { void this.runtime?.cancel(task.id).catch(() => { /* The turn ends on its own or with the connection. */ }); });
+    this.later(() => this.cancelTurn(task.id));
+  }
+
+  /** Interrupts a turn. If the interrupt cannot be confirmed, closing the runtime stops the turn with its connection. */
+  private cancelTurn(taskId: number): void {
+    void this.runtime?.cancel(taskId).catch(() => { this.runtime?.close(); });
   }
 
   private status(contact: Contact): string {
@@ -395,29 +401,34 @@ export class Engine {
     const contact = contacts.find(c => c.id === task.contactId)!;
     const fresh = task.threadId === null;
     if (this.dailyLimitReached(fresh)) return;
-    if (task.usage.turns >= limits.budget.turns * task.usage.allowance) {
+    // Every budget is checked before a turn starts, so no reply can start work past a limit without `continue #n`.
+    const { usage } = task; const budget = limits.budget; const allowance = usage.allowance;
+    const exhausted = usage.tokens > budget.tokens * allowance ? "tokens" : usage.toolCalls >= budget.toolCalls * allowance ? "toolCalls"
+      : usage.runMs >= budget.minutes * 60_000 * allowance ? "minutes" : usage.turns >= budget.turns * allowance ? "turns" : null;
+    if (exhausted) {
       this.commit(() => {
-        if (this.store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "limit", limit: "turns" } }, ["routed"]))
-          this.tell(contact, `task:${task.id}:limit:turns:${task.usage.turns}`, this.limitMessage(task.number, "turns"));
+        if (this.store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "limit", limit: exhausted } }, ["routed"]))
+          this.tell(contact, `task:${task.id}:limit:${exhausted}:${usage.turns}`, this.limitMessage(task.number, exhausted));
       });
       return;
     }
-    const input = task.input ?? CONTINUE_AFTER_LIMIT;
+    // The input stays on the task until the runtime accepts the turn, so a failed start loses nothing.
+    const input = fresh ? (task.input ? `${task.text}\n${task.input}` : task.text) : task.input ?? CONTINUE_AFTER_LIMIT;
+    const sent = fresh || task.input !== null ? input : null;
     const now = this.clock();
     let claimed = false;
     this.commit(() => {
-      claimed = this.store.updateTask(task.id, { state: "running", input: null, usage: { turns: task.usage.turns + 1 } }, ["routed"]);
+      claimed = this.store.updateTask(task.id, { state: "running", input: sent, usage: { turns: task.usage.turns + 1 } }, ["routed"]);
       if (claimed && fresh) this.store.addDaily("runtime-tasks", localDay(now, this.config.timezone), 1);
     });
     if (!claimed) return;
-    const turn: ActiveTurn = { taskId: task.id, since: now, approvals: new Map(), limit: null, gate: Promise.resolve() };
+    const turn: ActiveTurn = { taskId: task.id, since: now, approvals: new Map(), limit: null, gate: Promise.resolve(), sent };
     this.active.set(task.id, turn);
     let outcome: TurnOutcome;
     try {
       const current = this.store.task(task.id)!; const tools = this.host.tools(contact); const events = this.events(current, contact, turn);
       // Follow-ups sent before the first turn become part of the request.
-      outcome = fresh ? await runtime.start(task.input ? { ...current, text: `${current.text}\n${task.input}` } : current, tools, events)
-        : await runtime.resume(current, input, tools, events);
+      outcome = fresh ? await runtime.start({ ...current, text: input }, tools, events) : await runtime.resume(current, input, tools, events);
     } catch { outcome = { status: "interrupted" }; }
     this.finishTurn(contact, turn, outcome);
   }
@@ -425,7 +436,12 @@ export class Engine {
   private events(task: Task, contact: Contact, turn: ActiveTurn): RuntimeEvents {
     const live = () => this.active.get(task.id) === turn;
     return {
-      started: ({ threadId }) => { if (live()) this.store.updateTask(task.id, { threadId }); },
+      // Throws if the id cannot be saved, so the runtime does not start work Nori could not find again.
+      started: ({ threadId, turnId }) => {
+        if (!live()) return;
+        this.store.updateTask(task.id, { threadId });
+        if (turnId !== null && turn.sent !== null) this.store.consumeInput(task.id, turn.sent);
+      },
       approval: async ({ operation, detail }) => this.requestApproval(task.id, contact, turn, operation, detail),
       tool: async call => {
         try { return await this.callTool(task.id, contact, turn, call); }
@@ -457,7 +473,7 @@ export class Engine {
   private interrupt(turn: ActiveTurn, why: WaitingFor): void {
     turn.limit ??= why;
     for (const [id, resolve] of turn.approvals) { turn.approvals.delete(id); resolve(false); }
-    void this.runtime?.cancel(turn.taskId).catch(() => { /* The turn ends on its own or with the connection. */ });
+    this.cancelTurn(turn.taskId);
   }
 
   /** Interrupts turns past their time budget, and re-sends the interrupt to turns already stopped for any budget. */
@@ -466,7 +482,8 @@ export class Engine {
     if (!limits) return;
     for (const turn of this.active.values()) {
       const task = this.store.task(turn.taskId);
-      if (turn.limit) this.interrupt(turn, turn.limit);
+      if (task?.state === "cancelled") this.cancelTurn(turn.taskId);
+      else if (turn.limit) this.interrupt(turn, turn.limit);
       else if (task && turn.since !== null && task.usage.runMs + now - turn.since > limits.budget.minutes * 60_000 * task.usage.allowance)
         this.interrupt(turn, { kind: "limit", limit: "minutes" });
     }
@@ -507,7 +524,7 @@ export class Engine {
         expiresAt: now + limits.approvalMinutes * 60_000 });
       this.store.updateTask(taskId, { state: "waiting_contact", waitingFor: { kind: "approval" } });
       this.tell(contact, `approval:${approvalId}`, `Job #${task.number} needs your OK to ${operation}: ${detail}\n`
-        + `Reply ‘approve #${task.number}’ or ‘deny #${task.number}’ within ${limits.approvalMinutes} minutes.`);
+        + `Reply ‘approve A${approvalId}’ or ‘deny A${approvalId}’ within ${limits.approvalMinutes} minutes.`);
     });
     const id = approvalId;
     if (id === null) return Promise.resolve(false);
@@ -517,6 +534,7 @@ export class Engine {
   /** Called inside a transaction. The waiting turn is released only after the decision is committed. */
   private settle(approval: ApprovalRecord, status: "approved" | "denied" | "expired"): void {
     if (!this.store.settleApproval(approval.id, status)) return;
+    this.store.cancelOutbox(`approval:${approval.id}`);
     const task = this.store.task(approval.taskId)!;
     const pending = this.store.approvals(task.contactId).some(x => x.taskId === task.id && x.status === "pending");
     if (!pending && task.state === "waiting_contact" && task.waitingFor?.kind === "approval")
@@ -572,6 +590,12 @@ export class Engine {
         `use ${resolved.plugin.manifest.id} ‘${resolved.definition.kind}’`, JSON.stringify(args));
       if (!approved) return finish(false, "The person did not approve this.");
       if (!live()) return { success: false, text: "The job is no longer running." };
+      // Other calls may have used the budget while this one waited for approval.
+      const current = this.store.task(taskId)!;
+      if (current.usage.toolCalls >= this.config.runtime!.budget.toolCalls * current.usage.allowance) {
+        this.interrupt(turn, { kind: "limit", limit: "toolCalls" });
+        return { success: false, text: "This job has used its tool-call budget." };
+      }
     }
     const capture: string[] = []; const now = this.clock();
     const source: DispatchSource = { contact, time: now, now, replyKey: () => "", timer: null, sourceGuid: task.sourceGuid, capture };
@@ -590,9 +614,16 @@ export class Engine {
       if (turn.since !== null) this.stopClock(turn);
       for (const approval of this.store.approvals(contact.id))
         if (approval.taskId === turn.taskId && approval.status === "pending") this.store.settleApproval(approval.id, "denied");
+      if (outcome.status !== "interrupted" && turn.sent !== null) this.store.consumeInput(turn.taskId, turn.sent);
       const task = this.store.task(turn.taskId);
       if (!task || task.state === "cancelled") return;
       const n = task.number; const key = (suffix: string) => `task:${task.id}:turn:${task.usage.turns}:${suffix}`;
+      // A budget stop holds even if the turn finished with a question or failure at the same moment.
+      if (turn.limit?.kind === "limit" && outcome.status !== "completed") {
+        this.store.updateTask(task.id, { state: "waiting_contact", waitingFor: turn.limit });
+        this.tell(contact, key("limit"), this.limitMessage(n, turn.limit.limit));
+        return;
+      }
       // Follow-ups that arrived during the turn start another one.
       const next = task.input !== null ? "routed" : null;
       switch (outcome.status) {

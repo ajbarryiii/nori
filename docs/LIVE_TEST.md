@@ -132,8 +132,8 @@ Start the service again: `node dist/cli.js run --config "$CFG"`. From your phone
 
 1. Send: `Look up the current weather forecast for San Francisco and remind me tomorrow at 9 am if it will rain`.
    - Expect **one** acknowledgement: `Got it — job #N. I'll message you when it's done or if I need you. …`
-2. The job needs network access, so expect an approval request: `Job #N needs your OK to run a command: … Reply ‘approve #N’ or ‘deny #N’ within 60 minutes.`
-   - Check that the command shown is what it claims to be, then reply `approve #N`. Expect `Approved for job #N.`
+2. The job needs network access, so expect an approval request: `Job #N needs your OK to run a command: … Reply ‘approve A1’ or ‘deny A1’ within 60 minutes.` Each request has its own code.
+   - Check that the command shown is what it claims to be, then reply with its code, for example `approve A1`. Expect `Approved A1 for job #N.`
    - If Codex asks for more approvals, they arrive one at a time.
 3. If Codex asks a question (`Job #N asks: …`), just reply. Expect `Thanks — continuing job #N.`
 4. Expect a final result: `Job #N is done. …`
@@ -148,7 +148,7 @@ Start the service again: `node dist/cli.js run --config "$CFG"`. From your phone
 
 **Optional checks:**
 - `stop` while a job runs: expect `Stopped job #M. …`.
-- `deny #N` on an approval: the job continues without that command, or explains that it couldn't.
+- `deny A<code>` on an approval: the job continues without that command, or explains that it couldn't.
 
 ## 7. What to report back
 

@@ -8,8 +8,8 @@ export type EngineCommand =
   | { kind: "resume" }
   | { kind: "cancel"; id: number }
   | { kind: "stop" }
-  /** `id` may be omitted when exactly one job is waiting on that decision. */
-  | { kind: "approve" | "deny"; id: number | null }
+  /** `code` is the approval's number from its prompt (`approve A12`); null when the reply left it out. */
+  | { kind: "approve" | "deny"; code: number | null }
   | { kind: "continue"; id: number | null }
   /** Input for an open job: `#3 use the cheaper one`. */
   | { kind: "followUp"; id: number; text: string };
@@ -24,9 +24,11 @@ export function parseEngineCommand(input: string): EngineCommand | null {
   if (/^stop$/i.test(text)) return { kind: "stop" };
   const cancel = /^cancel(?: job| task)?\s+#?(\d+)$/i.exec(text);
   if (cancel && validId(cancel[1]!)) return { kind: "cancel", id: Number(cancel[1]) };
-  const decide = /^(approve|deny|continue)(?:\s+#?(\d+))?$/i.exec(text);
+  const decide = /^(approve|deny)(?:\s+(?:a(\d+)|#?\d+))?$/i.exec(text);
   if (decide && (!decide[2] || validId(decide[2])))
-    return { kind: decide[1]!.toLowerCase() as "approve" | "deny" | "continue", id: decide[2] ? Number(decide[2]) : null };
+    return { kind: decide[1]!.toLowerCase() as "approve" | "deny", code: decide[2] ? Number(decide[2]) : null };
+  const resume = /^continue(?:\s+#?(\d+))?$/i.exec(text);
+  if (resume && (!resume[1] || validId(resume[1]))) return { kind: "continue", id: resume[1] ? Number(resume[1]) : null };
   const followUp = /^#(\d+)[:,]?\s+(\S[\s\S]*)$/.exec(text);
   if (followUp && validId(followUp[1]!)) return { kind: "followUp", id: Number(followUp[1]), text: followUp[2]!.trim() };
   return null;

@@ -25,7 +25,7 @@ Supported examples:
 - `remind me to stretch in 20 minutes`
 - `list`, `done #1`, `snooze #1 20m`
 - `pause all`, `resume`, `status`, `help`, `cancel #1`
-- With Codex: `approve #1`, `deny #1`, `continue #1`, `#1 use the cheaper option`, `stop`
+- With Codex: `approve A1`, `deny A1` (the code from the request), `continue #1`, `#1 use the cheaper option`, `stop`
 
 Reminders send once unless explicitly snoozed. Snoozing preserves the original deadline. Ambiguous times or task references prompt one question. Other requests are durably queued and acknowledged as pending. Each contact sees and controls only their own reminders and jobs.
 

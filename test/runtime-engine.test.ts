@@ -162,14 +162,16 @@ test("an approval round trip holds the turn until the task's own contact decides
   });
   const { done: run } = await started(engine);
   assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.waitingFor], ["waiting_contact", { kind: "approval" }]);
-  assert.match(texts().at(-1)!, /^Job #1 needs your OK to run a command: curl https:\/\/example\.com\/status\nReply ‘approve #1’ or ‘deny #1’ within 60 minutes\.$/);
-  engine.acceptPage("sam", page([messageFrom(member, "approve #1", 2)]));
-  assert.equal(decision, undefined);
-  assert.match(texts(member).at(-1)!, /No approval is pending for job #1/);
+  assert.match(texts().at(-1)!, /^Job #1 needs your OK to run a command: curl https:\/\/example\.com\/status\nReply ‘approve A1’ or ‘deny A1’ within 60 minutes\.$/);
+  engine.acceptPage("sam", page([messageFrom(member, "approve A1", 2)]));
   engine.acceptPage("owner", page([message("approve #1", 3)]));
+  assert.equal(decision, undefined);
+  assert.equal(texts(member).at(-1), "Approval A1 is not pending.");
+  assert.equal(texts().at(-1), "Reply with the code from the request: ‘approve A1’ or ‘deny A1’.");
+  engine.acceptPage("owner", page([message("approve A1", 4)]));
   await run;
   assert.equal(decision, true);
-  assert.equal(texts().at(-2), "Approved for job #1.");
+  assert.equal(texts().at(-2), "Approved A1 for job #1.");
   assert.deepEqual(store.approvals().map(x => [x.taskId, x.status]), [[store.tasks()[0]!.id, "approved"]]);
   assert.equal(store.tasks()[0]?.state, "completed");
 });
@@ -185,7 +187,7 @@ test("deny, expiry, and cancellation all refuse a pending approval", async t => 
       return decision ? { status: "completed", message: "ok", evidence: ["x"] } : { status: "interrupted" };
     });
     const { done: run } = await started(engine);
-    if (ending === "deny") engine.acceptPage("owner", page([message("deny", 2)]));
+    if (ending === "deny") engine.acceptPage("owner", page([message("deny A1", 2)]));
     if (ending === "expire") { advance(61 * 60_000); await engine.tick(); }
     if (ending === "cancel") engine.acceptPage("owner", page([message("cancel #1", 2)]));
     await run;
@@ -240,10 +242,10 @@ test("high-impact tools need the contact's approval on every call", async t => {
   });
   const { done: run } = await started(engine);
   assert.match(texts().at(-1)!, /needs your OK to use mailer ‘send’: \{"to":"sam@example\.com"\}/);
-  engine.acceptPage("owner", page([message("deny #1", 2)]));
+  engine.acceptPage("owner", page([message("deny A1", 2)]));
   await flush(); await flush();
   assert.match(texts().at(-1)!, /needs your OK to use mailer ‘send’/);
-  engine.acceptPage("owner", page([message("approve #1", 3)]));
+  engine.acceptPage("owner", page([message("approve A2", 3)]));
   await run;
   assert.deepEqual(results, [false, true]);
   assert.equal(sent, 1);
@@ -316,7 +318,7 @@ test("approval waits do not count against the time budget", async t => {
   });
   const { done: run } = await started(engine);
   advance(45 * 60_000); await engine.tick();
-  engine.acceptPage("owner", page([message("approve", 2)]));
+  engine.acceptPage("owner", page([message("approve A1", 2)]));
   await run;
   assert.deepEqual(runtime.cancelled, []);
   assert.equal(store.tasks()[0]?.state, "completed");
@@ -413,7 +415,7 @@ test("status lists runtime progress for the sender only", async t => {
   assert.match(status, /Waiting for your approval: #2\./);
   assert.match(status, /Waiting to start: #3\./);
   assert.doesNotMatch(store.outbox("sam").at(-1)!.text, /#1|#2|#3/);
-  engine.acceptPage("owner", page([message("deny #2", 6)]));
+  engine.acceptPage("owner", page([message("deny A1", 6)]));
   await run;
 });
 
@@ -425,7 +427,7 @@ test("an overdue approval cannot be approved, even before the next tick expires 
   runtime.turns.push(async events => { decision = await events.approval({ operation: "run a command", detail: "curl x" }); return { status: "interrupted" }; });
   const { done } = await started(engine);
   advance(3 * 60 * 60_000);
-  engine.acceptPage("owner", page([message("approve #1", 2)]));
+  engine.acceptPage("owner", page([message("approve A1", 2)]));
   await done;
   assert.equal(decision, false);
   assert.equal(store.approvals()[0]?.status, "expired");
@@ -474,11 +476,11 @@ test("a job has at most one pending approval; the next is asked only after the f
   const { done } = await started(engine);
   assert.equal(store.approvals().filter(x => x.status === "pending").length, 1);
   assert.equal(texts().filter(x => x.includes("needs your OK")).length, 1);
-  engine.acceptPage("owner", page([message("approve #1", 2)]));
+  engine.acceptPage("owner", page([message("approve A1", 2)]));
   await flush(); await flush();
   assert.equal(sent, 1);
   assert.match(texts().at(-1)!, /needs your OK to run a command: ls/);
-  engine.acceptPage("owner", page([message("deny #1", 3)]));
+  engine.acceptPage("owner", page([message("deny A2", 3)]));
   await done;
   assert.equal(texts().at(-1), "Job #1 is done. [true,false]");
 });
@@ -528,8 +530,8 @@ test("a delegated task without a hint still runs, and a completed outcome withou
   assert.equal(texts().at(-1), "Job #1 couldn't be finished: Pick the Pixel. (It reported no checks, so it is not marked done.)");
 });
 
-test("an approval reply only covers requests that existed when it was sent", async t => {
-  const { engine, store, runtime, advance } = setup(t);
+test("an approval code covers only its own request, and prompts that can no longer be answered are withdrawn", async t => {
+  const { engine, store, runtime, transport, advance } = setup(t);
   engine.acceptPage("owner", page([message("check the weather service")]));
   await engine.routeTasks(null);
   const decisions: boolean[] = [];
@@ -539,12 +541,15 @@ test("an approval reply only covers requests that existed when it was sent", asy
     return { status: "completed", message: "ok", evidence: ["x"] };
   });
   const { done } = await started(engine);
-  advance(61 * 60_000); await engine.tick(); await flush();
+  transport.outcomes.push({ status: "not_started", reason: "offline" }, { status: "not_started", reason: "offline" });
+  await engine.tick();
+  advance(61 * 60_000); engine.maintain(); await flush();
   assert.deepEqual(decisions, [false]);
-  engine.acceptPage("owner", page([message("approve #1", 2, { sentAt: epoch + 30 * 60_000 })]));
+  assert.equal(store.outbox().find(x => x.text.includes("A1"))?.status, "cancelled");
+  engine.acceptPage("owner", page([message("approve A1", 2)]));
   await flush();
   assert.deepEqual(store.approvals().map(x => x.status), ["expired", "pending"]);
-  engine.acceptPage("owner", page([message("deny #1", 3, { sentAt: epoch + 62 * 60_000 })]));
+  engine.acceptPage("owner", page([message("deny A2", 3)]));
   await done;
   assert.deepEqual(decisions, [false, false]);
 });
@@ -583,4 +588,77 @@ test("budgets and approval expiry are enforced while a send is still in flight",
   engine.maintain();
   await done;
   assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "minutes" });
+});
+
+test("a cancel whose interrupt fails closes the runtime, and a cancelled turn is interrupted again each poll", async t => {
+  const { engine, store, runtime } = setup(t);
+  let closed = 0;
+  runtime.close = () => { closed++; };
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  held(runtime); runtime.onCancel = null;
+  const { done } = await started(engine);
+  runtime.onCancel = null;
+  runtime.cancel = async taskId => { runtime.cancelled.push(taskId); throw new Error("interrupt timed out"); };
+  engine.acceptPage("owner", page([message("cancel #1", 2)]));
+  await flush(); await flush();
+  assert.equal(closed, 1);
+  engine.maintain(); await flush();
+  assert.equal(runtime.cancelled.length, 2);
+  assert.equal(store.tasks()[0]?.state, "cancelled");
+  void done;
+});
+
+test("a request stays with the task until the runtime accepts its turn", async t => {
+  const { engine, store, runtime } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  engine.acceptPage("owner", page([message("#1 under $1500", 2)]));
+  runtime.turns.push(async () => { throw new Error("turn/start timed out"); });
+  runtime.start = async (task, _tools, events) => { runtime.calls.push({ kind: "start", task: task.id, input: task.text, tools: [], threadId: null });
+    events.started({ threadId: "thread-1", turnId: null }); throw new Error("turn/start timed out"); };
+  await engine.runTasks();
+  assert.deepEqual([store.tasks()[0]?.threadId, store.tasks()[0]?.input], ["thread-1", "research a laptop\nunder $1500"]);
+  engine.acceptPage("owner", page([message("continue #1", 3)]));
+  await engine.runTasks();
+  assert.match(runtime.calls.at(-1)!.input, /interrupted before it finished[\s\S]*research a laptop\nunder \$1500$/);
+  assert.equal(store.tasks()[0]?.input, null);
+});
+
+test("an exhausted budget holds even if the turn ends with a question, and is checked before any turn starts", async t => {
+  const { engine, store, runtime } = setup(t);
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async events => { events.usage(1001); return { status: "needs_input", message: "Which room first?" }; });
+  await engine.runTasks();
+  assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "tokens" });
+  store.updateTask(store.tasks()[0]!.id, { state: "routed", waitingFor: null, input: "kitchen" });
+  await engine.runTasks();
+  assert.equal(runtime.calls.length, 1);
+  assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "tokens" });
+});
+
+test("concurrent high-impact tool calls are charged against the budget when they run, not when they were asked", async t => {
+  let sent = 0;
+  const mailer: ActionPlugin = {
+    manifest: { id: "mailer", version: "1.0.0", stateVersion: 1, capabilities: [], roles: ["owner"], criteria: "Send mail.", examples: [] },
+    schema: { send: { to: { type: "string", maxLength: 100 } } }, migrate: () => {}, match: () => null,
+    handle: (_command, ctx) => { sent++; ctx.reply("Sent."); },
+    tools: [{ kind: "send", description: "Send an email.", impact: "high" }],
+  };
+  const cfg = { ...withRuntime, contacts: [{ ...owner, plugins: ["reminders", "mailer"] }] };
+  const { engine, runtime } = setup(t, cfg, [remindersPlugin, mailer]);
+  engine.acceptPage("owner", page([message("email everyone")]));
+  await engine.routeTasks(null);
+  let results: boolean[] = [];
+  runtime.turns.push(async events => {
+    results = (await Promise.all(["a", "b", "c"].map(callId => events.tool({ callId, name: "mailer_send", arguments: { to: `${callId}@example.com` } }))))
+      .map(r => r.success);
+    return { status: "interrupted" };
+  });
+  const { done } = await started(engine);
+  for (const [n, code] of ["A1", "A2", "A3"].entries()) { engine.acceptPage("owner", page([message(`approve ${code}`, n + 2)])); await flush(); await flush(); }
+  await done;
+  assert.equal(sent, 2);
+  assert.deepEqual(results, [true, true, false]);
 });
