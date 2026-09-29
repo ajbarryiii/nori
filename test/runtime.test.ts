@@ -153,7 +153,7 @@ for (const throws of [false, true]) {
   });
 }
 
-test("with a runtime, the service recovers interrupted turns, runs routed jobs, and closes the runtime on shutdown", async t => {
+test("with a runtime, the service recovers interrupted turns, runs routed jobs, and waits for the runtime to close on shutdown", async t => {
   const store = new Store(":memory:"); t.after(() => store.close()); enrollAt(store, undefined, 0, "db");
   const cfg = { ...config, runtime: { codexPath: "/usr/local/bin/codex", model: null, workspaceDir: "/tmp/nori-work",
     budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 1_000_000 }, daily: { tasks: 5, tokens: 5_000_000 }, approvalMinutes: 60 } };
@@ -161,13 +161,19 @@ test("with a runtime, the service recovers interrupted turns, runs routed jobs, 
   new Engine(cfg, store, transport, { clock: () => epoch }).acceptPage("owner", page([message("check the weather"), message("research a laptop", 2)]));
   store.updateTask(store.tasks()[0]!.id, { state: "running", threadId: "thread-old" });
   const started: string[] = []; let closed = 0;
+  let release!: () => void; const released = new Promise<void>(resolve => { release = resolve; });
   const runtime: Runtime = {
     manifest: { id: "codex", computerUse: "unverified", ownerOnly: true },
     start: async task => { started.push(task.text); controller.abort(); return { status: "completed", message: "Found it.", evidence: ["Checked"] } as TurnOutcome; },
-    resume: async () => ({ status: "interrupted" }), cancel: async () => {}, close: () => { closed++; },
+    resume: async () => ({ status: "interrupted" }), cancel: async () => {}, close: () => { closed++; return released; },
   };
-  await runService({ config: cfg, store, transport, checkIdentity: () => {}, signal: controller.signal, runtime,
-    wait: async () => { await new Promise<void>(resolve => setImmediate(resolve)); } });
+  let finished = false;
+  const service = runService({ config: cfg, store, transport, checkIdentity: () => {}, signal: controller.signal, runtime,
+    wait: async () => { await new Promise<void>(resolve => setImmediate(resolve)); } }).then(() => { finished = true; });
+  for (let n = 0; n < 10; n++) await new Promise<void>(resolve => setImmediate(resolve));
+  // The service lock is released after this returns, so it must outlast the runtime's processes.
+  assert.deepEqual([closed >= 1, finished], [true, false]);
+  release(); await service;
   assert.deepEqual(started, ["research a laptop"]);
   assert.deepEqual(store.tasks().map(x => [x.state, x.waitingFor]), [["waiting_contact", { kind: "interrupted" }], ["completed", null]]);
   assert.ok(closed >= 1);

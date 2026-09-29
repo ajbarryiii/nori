@@ -335,12 +335,14 @@ export interface Runtime {
   resume(task: Task, input: string, tools: readonly RuntimeTool[], events: RuntimeEvents): Promise<TurnOutcome>;
   /** Interrupts the task's active turn, if any. */
   cancel(taskId: number): Promise<void>;
-  close(): void;
+  /** Stops the runtime. Active turns end, and the promise resolves, only once every process it started has exited. */
+  close(): Promise<void>;
 }
 
 export interface RpcPort {
   request(method: string, params: Record<string, unknown>): Promise<unknown>;
   notify(method: string, params: Record<string, unknown>): void;
+  /** Rejects pending requests at once, then stops the server; `closed` reports when it has stopped. */
   close(): void;
 }
 
@@ -349,7 +351,10 @@ export interface RpcHandlers {
   /** The result becomes the response; a throw becomes an error response. */
   request?(method: string, params: Record<string, unknown>): Promise<unknown>;
   notification?(method: string, params: Record<string, unknown>): void;
-  /** The connection ended; pending requests have been rejected. */
+  /**
+   * The connection ended: pending requests have been rejected, and the server has exited along with every process it
+   * started that could still be traced to it.
+   */
   closed?(): void;
 }
 

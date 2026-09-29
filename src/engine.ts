@@ -258,7 +258,7 @@ export class Engine {
   private cancelTurn(taskId: number): void {
     // Only the turn that was targeted: by the time the failure arrives, another job's turn may be running.
     const turn = this.active.get(taskId);
-    void this.runtime?.cancel(taskId).catch(() => { if (turn && this.active.get(taskId) === turn) this.runtime?.close(); });
+    void this.runtime?.cancel(taskId).catch(() => { if (turn && this.active.get(taskId) === turn) void this.runtime?.close(); });
   }
 
   private status(contact: Contact): string {

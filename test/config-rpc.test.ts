@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { resolve } from "node:path";
 import { parseConfig, requireAssistantUser } from "../src/config.js";
@@ -92,6 +93,27 @@ test("stdio RPC can pass the child an explicit environment and reports when it c
   assert.ok(keys.includes("NORI_TEST")); assert.ok(!keys.includes("HOME"));
   await assert.rejects(rpc.request("exit", {}), /closed/);
   assert.equal(closed, 1);
+});
+
+/** Whether a process is still running. One that has exited but not yet been collected is not. */
+function running(pid: number): boolean {
+  try { return !execFileSync("/bin/ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim().startsWith("Z"); }
+  catch { return false; }
+}
+
+test("closing stops the server and every process it started, even in another session, before reporting it closed", async t => {
+  let reported!: () => void; const closed = new Promise<void>(resolve => { reported = resolve; });
+  const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,
+    handlers: { closed: () => reported() } });
+  const pids = await rpc.request("spawn", {}) as number[];
+  t.after(() => { for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ } } });
+  assert.deepEqual(pids.map(running), [true, true, true, true]);
+  let done = false; void closed.then(() => { done = true; });
+  rpc.close();
+  await assert.rejects(rpc.request("spawn", {}), /closed/);
+  assert.equal(done, false);
+  await closed;
+  assert.deepEqual(pids.map(running), [false, false, false, false]);
 });
 
 test("stdio RPC times out and rejects outstanding requests when child exits", async t => {

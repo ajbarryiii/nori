@@ -12,6 +12,8 @@ class FakeCodex implements RpcPort {
   notes: string[] = [];
   closed = 0;
   failTurnStart = false;
+  /** Holds the closed report, as a real connection does until the server's processes have exited. */
+  holdClose = false;
   private threads = 0; private turns = 0;
   /** `layers` is what `config/read` reports as Codex's configuration layers. */
   constructor(readonly handlers: RpcHandlers, private readonly layers: () => unknown = () => []) {}
@@ -28,7 +30,8 @@ class FakeCodex implements RpcPort {
   }
   params(method: string) { return this.requests.find(r => r.method === method)!.params; }
   notify(method: string) { this.notes.push(method); }
-  close() { this.closed++; this.handlers.closed?.(); }
+  close() { this.closed++; if (!this.holdClose) this.handlers.closed?.(); }
+  finishClose() { this.handlers.closed?.(); }
   emit(method: string, params: Record<string, unknown>) { this.handlers.notification?.(method, params); }
   ask(method: string, params: Record<string, unknown>) { return this.handlers.request!(method, params); }
   finish(threadId: string, turnId: string, text: string, status = "completed", error: unknown = null) {
@@ -264,13 +267,36 @@ test("an ambiguous turn start closes the connection so the turn cannot keep runn
   const { runtime, connections, events, seen } = setup(t);
   const first = runtime.start(task(1), [], events);
   await flush();
-  connections[0]!.failTurnStart = true;
+  connections[0]!.failTurnStart = true; connections[0]!.holdClose = true;
   const second = runtime.resume(task(2, "th-7"), "more", [], events);
+  let ended = false; void second.catch(() => { ended = true; });
   connections[0]!.finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
-  await first;
-  await assert.rejects(second);
+  await first; await flush();
   assert.equal(connections[0]!.closed, 1);
+  // The turn ends only once the connection reports that Codex's processes have exited.
+  assert.equal(ended, false);
+  connections[0]!.finishClose();
+  await assert.rejects(second);
   assert.deepEqual(seen.started.slice(-1), [{ threadId: "th-7", turnId: null }]);
+});
+
+test("closing ends active turns, and resolves, only once Codex's processes have exited; the next job waits for that", async t => {
+  const { runtime, connections, conn, events } = setup(t);
+  const active = runtime.start(task(1), [], events); await flush();
+  conn().holdClose = true;
+  let ended = false; void active.catch(() => { ended = true; });
+  let closed = false; const closing = runtime.close().then(() => { closed = true; });
+  const next = runtime.start(task(2), [], events); await flush();
+  assert.deepEqual([ended, closed, connections.length, connections[0]!.closed], [false, false, 1, 1]);
+  assert.equal(connections[0]!.requests.filter(r => r.method === "config/read").length, 1);
+  connections[0]!.finishClose();
+  await assert.rejects(active, /disconnected/); await closing;
+  await flush();
+  assert.equal(connections.length, 2);
+  assert.deepEqual(conn().requests.map(r => r.method), ["initialize", "config/read", "thread/start", "turn/start"]);
+  conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
+  assert.equal((await next).status, "completed");
+  await runtime.close();
 });
 
 test("Codex's own tool actions are reported as activity; plugin tool calls are not", async t => {

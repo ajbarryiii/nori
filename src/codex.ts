@@ -127,7 +127,8 @@ interface ActiveTurn {
   reject(error: Error): void;
 }
 
-interface Connection { rpc: RpcPort; ready: Promise<void>; loaded: Set<string> }
+/** `done` resolves once the connection has closed and Codex's processes have exited. A closing connection is never reused. */
+interface Connection { rpc: RpcPort; ready: Promise<void>; loaded: Set<string>; closing: boolean; done: Promise<void> }
 
 /**
  * The Codex app-server runtime. Each task gets its own persisted thread in a private working directory, with the
@@ -224,10 +225,13 @@ export class CodexRuntime implements Runtime {
     await this.connection.rpc.request("turn/interrupt", { threadId: turn.threadId, turnId: turn.turnId });
   }
 
-  close(): void {
+  /** Closes the app-server. Its turns end, and this resolves, once every process it started has exited. */
+  close(): Promise<void> {
     const connection = this.connection;
-    this.disconnect();
-    connection?.rpc.close();
+    if (!connection) return Promise.resolve();
+    connection.closing = true;
+    connection.rpc.close();
+    return connection.done;
   }
 
   private settings(taskId: number): Record<string, unknown> {
@@ -250,12 +254,15 @@ export class CodexRuntime implements Runtime {
   }
 
   private async connect(): Promise<Connection> {
+    // A new app-server starts only after the one being closed has stopped, so two jobs' commands never overlap.
+    while (this.connection?.closing) await this.connection.done;
     if (this.connection) { await this.connection.ready; return this.connection; }
-    let connection: Connection | null = null;
+    let connection: Connection | null = null; let finished!: () => void;
+    const done = new Promise<void>(resolve => { finished = resolve; });
     const rpc = this.options.connect({
       request: (method, params) => this.answer(method, params),
       notification: (method, params) => this.notice(method, params),
-      closed: () => { if (connection && this.connection === connection) this.disconnect(); },
+      closed: () => { if (connection && this.connection === connection) this.disconnect(); finished(); },
     });
     const ready = (async () => {
       const response = record(await rpc.request("initialize", { clientInfo: { name: "nori", title: "Nori", version: "0.1.0" },
@@ -263,7 +270,7 @@ export class CodexRuntime implements Runtime {
       if (typeof response?.userAgent !== "string") throw new Error("Invalid Codex initialization result.");
       rpc.notify("initialized", {});
     })();
-    connection = { rpc, ready, loaded: new Set() };
+    connection = { rpc, ready, loaded: new Set(), closing: false, done };
     this.connection = connection;
     try { await ready; } catch (error) {
       if (this.connection === connection) { this.connection = null; rpc.close(); }
@@ -298,10 +305,11 @@ export class CodexRuntime implements Runtime {
         })
         .catch(error => {
           if (this.turns.get(threadId) !== turn) return;
-          // Codex may have started the turn anyway. Closing the connection stops it, so it cannot keep running untracked.
+          // Codex may have started the turn anyway. Closing the connection stops it, so it cannot keep running untracked;
+          // the turn ends when the connection reports Codex's processes have exited.
+          if (this.connection === connection) { void this.close(); return; }
           this.turns.delete(threadId);
           reject(error instanceof Error ? error : new Error("Codex could not start the turn."));
-          if (this.connection === connection) this.close();
         });
     });
   }

@@ -1,6 +1,57 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
+import { promisify } from "node:util";
 import type { RpcHandlers, RpcPort } from "./contracts.js";
 import { object as record } from "./config.js";
+
+const run = promisify(execFile);
+const signal = (pid: number, name: NodeJS.Signals) => { try { process.kill(pid, name); } catch { /* Already gone. */ } };
+
+/** Every process's parent and start time. The start time keeps a reused process id from being mistaken for another. */
+async function processTable(): Promise<Map<number, { parent: number; start: string; exited: boolean }>> {
+  const { stdout } = await run("/bin/ps", ["-A", "-o", "pid=,ppid=,stat=,lstart="], { maxBuffer: 16 * 1_048_576 });
+  const table = new Map<number, { parent: number; start: string; exited: boolean }>();
+  for (const line of stdout.split("\n")) {
+    const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
+    if (row) table.set(Number(row[1]), { parent: Number(row[2]), exited: row[3]!.startsWith("Z"), start: row[4]! });
+  }
+  return table;
+}
+
+/**
+ * Pauses a process and all its descendants, including those in other sessions, so none can start another process or be
+ * orphaned out of reach, then kills them all and waits until none is running. `uncollected` reports whether `root` is
+ * still a child this process has not collected, so its id cannot belong to anything else.
+ */
+async function killTree(root: number, uncollected: () => boolean): Promise<void> {
+  if (!uncollected()) return;
+  signal(root, "SIGSTOP");
+  const found = new Map<number, string>();
+  for (let round = 0; round < 50; round++) {
+    const table = await processTable();
+    const start = table.get(root)?.start;
+    if (!uncollected()) found.delete(root);
+    else if (start !== undefined && !found.has(root)) found.set(root, start);
+    let added = false; let grew = true;
+    while (grew) {
+      grew = false;
+      for (const [pid, entry] of table) {
+        if (found.has(pid) || !found.has(entry.parent) || table.get(entry.parent)?.start !== found.get(entry.parent)) continue;
+        signal(pid, "SIGSTOP"); found.set(pid, entry.start); added = grew = true;
+      }
+    }
+    if (!added) break;
+  }
+  for (let round = 0; round < 40 && found.size; round++) {
+    const table = await processTable();
+    for (const [pid, start] of found) {
+      const entry = table.get(pid);
+      if (!entry || entry.start !== start || entry.exited || (pid === root && !uncollected())) found.delete(pid);
+      else signal(pid, "SIGKILL");
+    }
+    if (found.size) await delay(50);
+  }
+}
 
 export class RpcError extends Error {
   constructor(readonly code: number, message: string, readonly data: unknown = null) { super(message); }
@@ -16,9 +67,11 @@ export class StdioRpc implements RpcPort {
   private nextId = 1;
   private buffer = "";
   private closed = false;
+  private readonly exited: Promise<void>;
   constructor(private readonly options: { command: string; args: string[]; timeoutMs: number; jsonrpc?: boolean;
     env?: NodeJS.ProcessEnv; handlers?: RpcHandlers }) {
     this.child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "pipe"], shell: false, ...(options.env ? { env: options.env } : {}) });
+    this.exited = new Promise(resolve => { this.child.once("exit", () => resolve()); this.child.once("error", () => resolve()); });
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.receive(chunk));
     // Drain diagnostics without copying provider messages or credentials to our logs.
@@ -82,13 +135,20 @@ export class StdioRpc implements RpcPort {
       result => { if (!this.closed) { try { this.write({ id, result: result ?? null }); } catch { this.close(); } } },
       () => { if (!this.closed) refuse("Request refused."); });
   }
+  /**
+   * Rejects pending requests, then stops the server and every process it started, including ones in their own
+   * sessions (Codex runs commands that way), and reports `closed` once they have exited. Processes are found through
+   * the running server: a server that already exited leaves nothing to trace.
+   */
   close(): void {
     if (this.closed) return;
     this.closed = true;
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("RPC connection closed.")); }
-    this.pending.clear(); this.child.stdin.destroy(); this.child.kill("SIGTERM");
-    const killTimer = setTimeout(() => { if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill("SIGKILL"); }, 2_000);
-    killTimer.unref(); this.child.once("close", () => clearTimeout(killTimer));
-    try { this.options.handlers?.closed?.(); } catch { /* Closing never throws. */ }
+    this.pending.clear(); this.child.stdin.destroy();
+    const report = () => { try { this.options.handlers?.closed?.(); } catch { /* Closing never throws. */ } };
+    const pid = this.child.pid; const uncollected = () => this.child.exitCode === null && this.child.signalCode === null;
+    if (pid === undefined || !uncollected()) { report(); return; }
+    void killTree(pid, uncollected).catch(() => { this.child.kill("SIGKILL"); })
+      .then(() => { this.child.kill("SIGKILL"); return this.exited; }).then(report);
   }
 }

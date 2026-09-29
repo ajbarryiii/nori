@@ -95,7 +95,7 @@ The template writes operational output into the data directory; it does not rota
 
 ## Recovery and data
 
-- `service.lock` prevents concurrent owners. After a crash, inspect its PID and ensure the former service and its `imsg` child have stopped before manually removing it. Never remove a lock merely because a second launch failed.
+- `service.lock` prevents concurrent owners. After a crash, inspect its PID and ensure the former service and its `imsg` and `codex app-server` children, and any commands Codex started, have stopped before manually removing it. Never remove a lock merely because a second launch failed.
 - An outgoing `uncertain` item may already have been sent. Review the assistant's Messages conversation before deciding what to do. There is no automatic retry or resend command for these items yet. `sent` means a local message GUID was observed; it is not proof of phone delivery.
 - A new Messages database inode/path/birth time or changed assistant username invalidates every enrollment. A contact whose configured conversation no longer matches its enrollment halts the service. Stop, back up Nori state, and reconcile pending work. There is no automatic cursor reset, unenroll, or migration command. Changing Apple Accounts in an existing Messages database also needs manual review; filesystem identity is not an Apple Account sign-in detector.
 - A state database created before approved contacts is refused. Move `state.sqlite` and its sidecars aside and enroll each contact again. Its reminders and jobs are not migrated.
@@ -151,7 +151,7 @@ How a job behaves over iMessage:
 - When Codex needs to leave the sandbox (network access, files outside the job directory) or calls a high-impact plugin tool, Nori asks `Job #3 needs your OK to …` with the exact command, the files it would change, any extra access, or the tool's full arguments. Reply with the code from that message, for example `approve A7` or `deny A7`; a code only ever answers its own request. A job asks one approval at a time. Unanswered or overdue requests are refused after `approvalMinutes`, and anything too long to show in full is refused without asking.
 - Reaching a time, turn, tool-call, or usage limit pauses the job with a message; `continue #3` allows one more allowance. Daily limits hold new jobs until the next day. `status` lists running, waiting, paused, and waiting-to-start jobs.
 - `cancel #3` or `stop` interrupts a running job. Anything it already did stays done.
-- If Nori stops or loses the Codex connection mid-job, the job waits as interrupted and is never resubmitted automatically. `continue #3` resumes the same thread and tells Codex to check what was already done first.
+- If Nori stops or loses the Codex connection mid-job, the job waits as interrupted and is never resubmitted automatically. `continue #3` resumes the same thread and tells Codex to check what was already done first. When Nori stops, cancels a job whose interrupt fails, or closes the connection, it kills Codex and every command Codex started before the job ends or the service exits.
 
 Boundaries and known limits:
 

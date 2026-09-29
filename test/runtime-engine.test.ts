@@ -23,7 +23,7 @@ class FakeRuntime implements Runtime {
     return turn(events, input);
   }
   async cancel(taskId: number) { this.cancelled.push(taskId); this.onCancel?.(); }
-  close() {}
+  async close() {}
 }
 
 /** A turn that stays active until the test finishes it or the engine cancels it. */
@@ -625,7 +625,7 @@ test("budgets and approval expiry are enforced while a send is still in flight",
 test("a cancel whose interrupt fails closes the runtime, and a cancelled turn is interrupted again each poll", async t => {
   const { engine, store, runtime } = setup(t);
   let closed = 0;
-  runtime.close = () => { closed++; };
+  runtime.close = async () => { closed++; };
   engine.acceptPage("owner", page([message("organize everything")]));
   await engine.routeTasks(null);
   held(runtime); runtime.onCancel = null;
@@ -899,7 +899,7 @@ test("continuing a paused job withdraws its unsent pause notice", async t => {
 
 test("a late interrupt failure for a finished turn does not stop the next job", async t => {
   const { engine, store, runtime } = setup(t);
-  let closed = 0; runtime.close = () => { closed++; };
+  let closed = 0; runtime.close = async () => { closed++; };
   let fail!: (error: Error) => void;
   runtime.cancel = taskId => { runtime.cancelled.push(taskId); return new Promise((_r, reject) => { fail = reject; }); };
   engine.acceptPage("owner", page([message("research a laptop"), message("research a phone", 2)]));

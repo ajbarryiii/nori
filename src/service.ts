@@ -80,7 +80,7 @@ export async function runService(options: { config: Config; store: Store; transp
   };
   const core = new Engine(config, store, guarded, { ...(options.plugins ? { plugins: options.plugins } : {}), ...(runtime ? { runtime } : {}) });
   // Closing the runtime ends an active turn, which leaves its task interrupted until the contact continues it.
-  const stop = () => { stopped = true; transport.close(); runtime?.close(); };
+  const stop = () => { stopped = true; transport.close(); return runtime?.close(); };
   signal.addEventListener("abort", stop, { once: true });
   try {
     store.recoverInFlight();
@@ -100,8 +100,9 @@ export async function runService(options: { config: Config; store: Store; transp
     }
   } catch (error) { if (!signal.aborted) throw error; }
   finally {
-    stop(); signal.removeEventListener("abort", stop);
-    await Promise.allSettled([sending, routing, working]);
+    // The caller releases the service lock after this returns, so wait until the runtime's processes have exited.
+    const closed = stop(); signal.removeEventListener("abort", stop);
+    await Promise.allSettled([sending, routing, working, closed]);
     store.recoverInFlight();
   }
 }
