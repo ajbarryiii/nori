@@ -620,10 +620,10 @@ test("a request stays with the task until the runtime accepts its turn", async t
   runtime.start = async (task, _tools, events) => { runtime.calls.push({ kind: "start", task: task.id, input: task.text, tools: [], threadId: null });
     events.started({ threadId: "thread-1", turnId: null }); throw new Error("turn/start timed out"); };
   await engine.runTasks();
-  assert.deepEqual([store.tasks()[0]?.threadId, store.tasks()[0]?.input], ["thread-1", `research a laptop\n${S}under $1500`]);
+  assert.deepEqual([store.tasks()[0]?.threadId, store.tasks()[0]?.input], ["thread-1", `${S}research a laptop\n${S}under $1500`]);
   engine.acceptPage("owner", page([message("continue #1", 3)]));
   await engine.runTasks();
-  assert.match(runtime.calls.at(-1)!.input, /interrupted before it finished[\s\S]*research a laptop\n\[Sent [^\]]+\] under \$1500$/);
+  assert.match(runtime.calls.at(-1)!.input, /interrupted before it finished[\s\S]*\[Sent 2026-09-28T16:00:00\.000Z\] research a laptop\n\[Sent [^\]]+\] under \$1500$/);
   assert.equal(store.tasks()[0]?.input, null);
 });
 
@@ -853,4 +853,16 @@ test("every budget hold after a continue is explained", async t => {
     await engine.runTasks();
     assert.equal(texts().at(-1), "Job #1 reached its usage limit. Reply ‘continue #1’ to allow more, or ‘cancel #1’.", String(n));
   }
+});
+
+test("continuing a paused job withdraws its unsent pause notice", async t => {
+  const { engine, store, runtime, transport } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async () => { throw new Error("disconnected"); });
+  await engine.runTasks();
+  transport.outcomes.push({ status: "sent", messageGuid: "ack" }, { status: "not_started", reason: "offline" });
+  await engine.tick();
+  engine.acceptPage("owner", page([message("continue #1", 2)]));
+  assert.equal(store.outbox().find(x => x.text.startsWith("Job #1 was interrupted"))?.status, "cancelled");
 });

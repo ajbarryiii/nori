@@ -284,6 +284,12 @@ export class Store {
     const row = this.db.prepare("SELECT dispatched_at FROM outbox WHERE dedup_key=? AND status IN ('sending','sent','uncertain')").get(key);
     return row === undefined || row.dispatched_at === null ? null : Number(row.dispatched_at);
   }
+  /** Withdraws a job's unsent interruption and budget-limit notices once it continues. */
+  cancelPauseNotices(taskId: number): void {
+    const prefix = `task:${taskId}:`;
+    this.db.prepare(`UPDATE outbox SET withdrawn=1, status=CASE status WHEN 'pending' THEN 'cancelled' ELSE status END
+      WHERE substr(dedup_key,1,?)=? AND (dedup_key LIKE '%:interrupted' OR dedup_key LIKE '%:limit%')`).run(prefix.length, prefix);
+  }
   /** Removes input the runtime has accepted, keeping anything added since it was sent. */
   consumeInput(id: number, sent: string): void {
     const input = this.task(id)?.input;

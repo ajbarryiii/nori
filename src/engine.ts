@@ -200,6 +200,7 @@ export class Engine {
         const task = paused[0];
         if (!task) return command.id === null ? "No job is paused." : `Job #${command.id} isn't paused.`;
         const resume = task.waitingFor?.kind === "limit" ? CONTINUE_AFTER_LIMIT : CONTINUE_AFTER_INTERRUPTION;
+        this.store.cancelPauseNotices(task.id);
         this.store.updateTask(task.id, { state: "routed", waitingFor: null, input: task.input ? `${resume}\n${task.input}` : resume,
           usage: task.waitingFor?.kind === "limit" ? { allowance: task.usage.allowance + 1 } : {} }, ["waiting_contact"]);
         return `Continuing job #${task.number}.`;
@@ -435,9 +436,10 @@ export class Engine {
       });
       return;
     }
-    // The input stays on the task until the runtime accepts the turn, so a failed start loses nothing.
+    // The input stays on the task until the runtime accepts the turn, so a failed start loses nothing. A retained first
+    // request keeps its send time, which the runtime otherwise adds only when starting a thread.
     const input = fresh ? (task.input ? `${task.text}\n${task.input}` : task.text) : task.input ?? CONTINUE_AFTER_LIMIT;
-    const sent = fresh || task.input !== null ? input : null;
+    const sent = fresh ? `[Sent ${new Date(task.time).toISOString()}] ${input}` : task.input !== null ? input : null;
     const now = this.clock();
     let claimed = false;
     this.commit(() => {
