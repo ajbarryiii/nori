@@ -12,7 +12,7 @@
   { "text": "list", "label": "reminders", "grammar": true },
   { "text": "Can you remind me to call mom in 2 hours?", "label": "reminders", "outcome": "completed" },
   { "text": "please note that the plumber comes Friday", "label": "reminders", "outcome": "completed" },
-  { "text": "could you remind me about the dentist sometime?", "label": "reminders", "outcome": "waiting_contact" },
+  { "text": "could you remind me about the dentist sometime?", "label": "reminders", "outcome": "failed" },
   { "text": "research a replacement for my laptop", "label": "runtime", "outcome": "queued" },
   { "text": "find the return instructions for my last order", "label": "runtime", "outcome": "queued" },
   { "text": "remind me tomorrow and also research a replacement", "label": "runtime", "multiAction": true, "outcome": "queued" },

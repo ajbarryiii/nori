@@ -107,15 +107,15 @@ test("a claimed route still acts if the lifecycle gate closes while Jev answers"
   assert.equal(reminders(store).length, 1);
 });
 
-test("an interpret clarification asks one question and waits for the contact", async t => {
+test("an interpret clarification asks for a complete request and closes the job", async t => {
   const { engine, store } = setup(t);
   engine.acceptPage("owner", page([message("could you remind me about the dentist sometime?")]));
   await engine.routeTasks(always(decide({ kind: "action", pluginId: "reminders" })));
-  assert.equal(store.tasks()[0]?.state, "waiting_contact");
+  assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.waitingFor], ["failed", null]);
   assert.match(store.outbox().at(-1)!.text, /date and time/);
-  engine.acceptPage("owner", page([message("status", 2), message("cancel #1", 3)]));
-  assert.match(store.outbox().at(-2)!.text, /Waiting for your reply: #1/);
-  assert.equal(store.tasks()[0]?.state, "cancelled");
+  engine.acceptPage("owner", page([message("remind me to call the dentist tomorrow at 10 am", 2), message("status", 3)]));
+  assert.equal(reminders(store).length, 1);
+  assert.doesNotMatch(store.outbox().at(-1)!.text, /Waiting for your reply/);
 });
 
 test("a task cancelled while its route is pending is never executed", async t => {

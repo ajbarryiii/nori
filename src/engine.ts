@@ -402,7 +402,8 @@ export class Engine {
       if (current?.state !== "queued" || current.input !== null) return;
       if (isClarification(result)) {
         this.enqueue(source(now), `task:${task.id}:question`, result.clarify);
-        this.store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "clarification" } }, ["queued"]);
+        // The question asks for a complete new request, so this job is closed rather than left waiting for a reply.
+        this.store.updateTask(task.id, { state: "failed", waitingFor: null, outcome: result.clarify }, ["queued"]);
         return;
       }
       const command = this.host.validate(plugin, result);
