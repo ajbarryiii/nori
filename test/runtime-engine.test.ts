@@ -885,3 +885,18 @@ test("a late interrupt failure for a finished turn does not stop the next job", 
   assert.equal(closed, 0);
   assert.equal(store.tasks()[1]?.state, "running");
 });
+
+test("an approval requested after the time budget ran out is refused", async t => {
+  const { engine, store, runtime, advance } = setup(t);
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  let events!: RuntimeEvents; let finish!: (outcome: TurnOutcome) => void;
+  runtime.turns.push(async e => { events = e; return new Promise<TurnOutcome>(r => { finish = r; }); });
+  const { done } = await started(engine);
+  advance(30 * 60_000 + 1000);
+  assert.equal(await events.approval({ operation: "run a command", detail: "ls" }), false);
+  assert.equal(store.approvals().length, 0);
+  assert.deepEqual(runtime.cancelled, [store.tasks()[0]!.id]);
+  finish({ status: "interrupted" }); await done;
+  assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "minutes" });
+});

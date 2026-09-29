@@ -190,3 +190,10 @@ test("list stays within one message even with very long notes", t => {
   assert.ok(reply.length <= 2000);
   assert.equal(store.tasks().length, 0);
 });
+
+test("boundary whitespace does not turn a simple request into a compound one", t => {
+  const { engine, store } = setup(t);
+  engine.acceptPage("owner", page([message("remind me to stretch in 1 minute\n"), message("\nnote buy milk", 2)]));
+  assert.deepEqual(reminders(store).map(x => x.title), ["stretch", "buy milk"]);
+  assert.equal(store.tasks().length, 0);
+});

@@ -110,7 +110,8 @@ export class Engine {
     const command = parseEngineCommand(message.text);
     if (command) { reply(this.command(contact, command, message.sentAt)); return; }
     // Grammars consume the entire message, so a compound request never reaches one.
-    if (!isCompound(message.text)) {
+    // Boundary whitespace is not an instruction separator; only internal markers make a request compound.
+    if (!isCompound(message.text.trim())) {
       const context = { contact, time: message.sentAt, timezone: this.config.timezone };
       for (const plugin of this.host.permitted(contact)) {
         const id = plugin.manifest.id;
@@ -548,17 +549,20 @@ export class Engine {
 
   private ask(taskId: number, contact: Contact, turn: ActiveTurn, operation: string, detail: string): Promise<boolean> {
     const limits = this.config.runtime!; const now = this.clock();
-    let approvalId: number | null = null;
+    let approvalId: number | null = null; let overBudget = false;
     this.commit(() => {
       const task = this.store.task(taskId);
       if (!task || !this.open(taskId, turn)) return;
       this.stopClock(turn);
+      // Time already used counts even though the clock pauses for approvals; past the budget, nothing is asked.
+      if (this.store.task(taskId)!.usage.runMs > limits.budget.minutes * 60_000 * task.usage.allowance) { overBudget = true; return; }
       approvalId = this.store.addApproval({ taskId, contactId: contact.id, operation, detail, createdAt: now,
         expiresAt: now + limits.approvalMinutes * 60_000 });
       this.store.updateTask(taskId, { state: "waiting_contact", waitingFor: { kind: "approval" } });
       this.tell(contact, `approval:${approvalId}`, `Job #${task.number} needs your OK to ${operation}: ${detail}\n`
         + `Reply ‘approve A${approvalId}’ or ‘deny A${approvalId}’ within ${limits.approvalMinutes} minutes.`);
     });
+    if (overBudget) { if (turn.since === null) turn.since = this.clock(); this.interrupt(turn, { kind: "limit", limit: "minutes" }); }
     const id = approvalId;
     if (id === null) return Promise.resolve(false);
     return new Promise(resolve => { turn.approvals.set(id, resolve); });
