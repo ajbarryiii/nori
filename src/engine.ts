@@ -224,6 +224,7 @@ export class Engine {
   private followUp(contact: Contact, task: Task, text: string): string {
     const waiting = task.state === "waiting_contact" ? task.waitingFor?.kind : null;
     if (waiting === "question") {
+      this.store.cancelOutbox(`task:${task.id}:turn:${task.usage.turns}:question`);
       this.store.appendInput(task.id, text);
       this.store.updateTask(task.id, { state: "routed", waitingFor: null }, ["waiting_contact"]);
       return `Thanks — continuing job #${task.number}.`;
@@ -365,7 +366,8 @@ export class Engine {
       }
       this.store.saveDecision(task.id, decision);
       // The task is already claimed, so finish it even if the lifecycle gate closed meanwhile; it would never be routed again.
-      const plugin = decision && this.actionFor(contact, task, decision);
+      // A plugin interprets only the original text, so a job with queued follow-ups is left for the runtime.
+      const plugin = decision && this.store.task(task.id)?.input === null && this.actionFor(contact, task, decision);
       if (plugin) await this.dispatchTask(contact, task, plugin);
       // A retained plugin failure stays queued for review rather than being retried in the runtime.
       if (this.runtimeFor(contact) && this.store.task(task.id)?.failure === null) this.store.updateTask(task.id, { state: "routed" }, ["queued"]);
@@ -391,7 +393,8 @@ export class Engine {
     catch { this.store.setTaskFailure(task.id, `${id}: interpret error`); return; }
     const now = this.clock();
     this.store.transaction(() => {
-      if (this.store.task(task.id)?.state !== "queued") return;
+      const current = this.store.task(task.id);
+      if (current?.state !== "queued" || current.input !== null) return;
       if (isClarification(result)) {
         this.enqueue(source(now), `task:${task.id}:question`, result.clarify);
         this.store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "clarification" } }, ["queued"]);

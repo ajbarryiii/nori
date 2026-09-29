@@ -781,3 +781,27 @@ test("a budget stop refuses an approval that was already pending", async t => {
   assert.equal(texts().at(-1), "Approval A1 is not pending.");
   finish({ status: "interrupted" }); await done;
 });
+
+test("a job with a queued follow-up goes to the runtime instead of a plugin route that would ignore it", async t => {
+  const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { reminders: 0.9 } };
+  const { engine, store, runtime } = setup(t, { ...withRuntime, jev });
+  engine.acceptPage("owner", page([message("Can you remind me to call mom in 2 hours?"), message("#1 make that 3 hours", 2)]));
+  await engine.routeTasks({ classify: async () => ({ model: "jev-test", catalogVersion: "v", route: { kind: "action", pluginId: "reminders" },
+    confidence: 1, probabilities: {}, multiAction: false }) });
+  assert.equal(reminders(store).length, 0);
+  assert.equal(store.tasks()[0]?.state, "routed");
+  await engine.runTasks();
+  assert.match(runtime.calls[0]!.input, /2 hours\?\nmake that 3 hours$/);
+});
+
+test("answering a question withdraws it if it has not been delivered yet", async t => {
+  const { engine, store, runtime, transport } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async () => ({ status: "needs_input", message: "What is your budget?" }));
+  await engine.runTasks();
+  transport.outcomes.push({ status: "sent", messageGuid: "ack" }, { status: "not_started", reason: "offline" });
+  await engine.tick();
+  engine.acceptPage("owner", page([message("#1 under $1000", 2)]));
+  assert.equal(store.outbox().find(x => x.text.startsWith("Job #1 asks"))?.status, "cancelled");
+});
