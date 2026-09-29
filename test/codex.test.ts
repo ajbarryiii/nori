@@ -96,17 +96,14 @@ test("approvals and tool calls from Codex go through events; other server reques
     { decision: "accept" });
   setApprove(false);
   assert.deepEqual(await conn().ask("item/fileChange/requestApproval", { ...ids, reason: "write outside workspace", grantRoot: "/Users" }), { decision: "decline" });
-  assert.deepEqual(seen.approvals, [
-    { operation: "run a command", detail: "curl https://example.com (in /w; needs network)" },
-    { operation: "change files", detail: "write outside workspace (/Users)" },
-  ]);
+  assert.deepEqual(seen.approvals, [{ operation: "run a command", detail: "curl https://example.com (in /w; needs network)" }]);
   assert.deepEqual(await conn().ask("item/tool/call", { ...ids, callId: "c1", namespace: null, tool: "reminders_note", arguments: { title: "milk" } }),
     { contentItems: [{ type: "inputText", text: "Saved." }], success: true });
   assert.deepEqual(seen.tools, [{ callId: "c1", name: "reminders_note", arguments: { title: "milk" } }]);
   for (const method of ["item/permissions/requestApproval", "item/tool/requestUserInput", "execCommandApproval", "mcpServer/elicitation/request", "account/chatgptAuthTokens/refresh"])
     await assert.rejects(conn().ask(method, ids), method);
   await assert.rejects(conn().ask("item/commandExecution/requestApproval", { ...ids, threadId: "th-other", command: "rm -rf /" }));
-  assert.equal(seen.approvals.length, 2);
+  assert.equal(seen.approvals.length, 1);
   conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
   await done;
 });
@@ -255,6 +252,24 @@ test("command approvals use the command from its item, and are refused when the 
   assert.deepEqual(await conn().ask("item/commandExecution/requestApproval", { ...ids, itemId: "c1", reason: "clean up" }), { decision: "accept" });
   assert.deepEqual(await conn().ask("item/commandExecution/requestApproval", { ...ids, itemId: "unknown", reason: "clean up" }), { decision: "decline" });
   assert.deepEqual(seen.approvals, [{ operation: "run a command", detail: "rm -rf /w/tmp (in /w; clean up)" }]);
+  conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
+  await done;
+});
+
+test("file approvals need known files, and permission entries are shown or refused", async t => {
+  const { runtime, conn, events, seen } = setup(t);
+  const done = runtime.start(task(1), [], events); await flush();
+  const ids = { threadId: "th-1", turnId: "tu-1", startedAtMs: 0 };
+  assert.deepEqual(await conn().ask("item/fileChange/requestApproval", { ...ids, itemId: "none", reason: "update settings" }), { decision: "decline" });
+  await conn().ask("item/commandExecution/requestApproval", { ...ids, itemId: "c1", command: "python task.py", cwd: "/w",
+    additionalPermissions: { network: null, fileSystem: { read: null, write: null, entries: [
+      { path: { type: "path", path: "/Users/receipts/Library/Application Support/Nori" }, access: "write" },
+      { path: { type: "glob_pattern", pattern: "/tmp/*.log" }, access: "read" },
+      { path: { type: "special", value: { kind: "tmpdir" } }, access: "write" }] } } });
+  assert.deepEqual(await conn().ask("item/commandExecution/requestApproval", { ...ids, itemId: "c2", command: "ls", cwd: "/w",
+    additionalPermissions: { network: null, fileSystem: { read: null, write: null, somethingNew: ["/"] } } }), { decision: "decline" });
+  assert.deepEqual(seen.approvals, [{ operation: "run a command",
+    detail: "python task.py (in /w; write access to /Users/receipts/Library/Application Support/Nori; read access to files matching /tmp/*.log; write access to the temporary directory)" }]);
   conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
   await done;
 });

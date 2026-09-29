@@ -431,7 +431,7 @@ export class Engine {
     if (exhausted) {
       this.commit(() => {
         if (this.store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "limit", limit: exhausted } }, ["routed"]))
-          this.tell(contact, `task:${task.id}:limit:${exhausted}:${usage.turns}`, this.limitMessage(task.number, exhausted));
+          this.tell(contact, `task:${task.id}:limit:${exhausted}:${usage.turns}:${allowance}`, this.limitMessage(task.number, exhausted));
       });
       return;
     }
@@ -507,6 +507,8 @@ export class Engine {
     const limits = this.config.runtime; const now = this.clock();
     if (!limits) return;
     for (const turn of this.active.values()) {
+      // Checkpoint running time so a crash does not give the job its used time back.
+      if (turn.since !== null) { this.stopClock(turn); turn.since = now; }
       const task = this.store.task(turn.taskId);
       if (task?.state === "cancelled") this.cancelTurn(turn.taskId);
       else if (turn.limit) this.interrupt(turn, turn.limit);

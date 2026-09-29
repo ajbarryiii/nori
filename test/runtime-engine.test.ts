@@ -831,3 +831,26 @@ test("follow-ups carry their send time to the runtime", async t => {
   await engine.runTasks();
   assert.equal(runtime.calls.at(-1)!.input, "[Sent 2026-09-29T17:00:00.000Z] tomorrow at 9 am");
 });
+
+test("running time is checkpointed, so a restart keeps the time already used", async t => {
+  const { engine, store, runtime, advance } = setup(t);
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  held(runtime);
+  void (await started(engine));
+  advance(29 * 60_000); engine.maintain();
+  assert.equal(store.tasks()[0]?.usage.runMs, 29 * 60_000);
+});
+
+test("every budget hold after a continue is explained", async t => {
+  const { engine, runtime, texts } = setup(t);
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async events => { events.usage(3500); return { status: "interrupted" }; });
+  await engine.runTasks();
+  for (const n of [2, 3]) {
+    engine.acceptPage("owner", page([message("continue #1", n)]));
+    await engine.runTasks();
+    assert.equal(texts().at(-1), "Job #1 reached its usage limit. Reply ‘continue #1’ to allow more, or ‘cancel #1’.", String(n));
+  }
+});

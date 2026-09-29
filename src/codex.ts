@@ -49,6 +49,43 @@ const QUIET = ["item/agentMessage/delta", "item/plan/delta", "item/reasoning/sum
   "item/reasoning/textDelta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/fileChange/patchUpdated",
   "command/exec/outputDelta", "process/outputDelta", "turn/diff/updated", "rawResponseItem/completed", "rawResponse/completed"];
 
+/**
+ * Describes extra access a command asks for. Returns null when the request contains a form that cannot be shown in
+ * full, so it is refused rather than approved blind.
+ */
+function describeGrants(extra: Record<string, unknown> | null): string[] | null {
+  if (!extra) return [];
+  if (Object.keys(extra).some(key => key !== "network" && key !== "fileSystem")) return null;
+  const grants: string[] = [];
+  const network = record(extra.network);
+  if (extra.network != null && (!network || Object.keys(network).some(key => key !== "enabled"))) return null;
+  if (network?.enabled === true) grants.push("network access");
+  if (extra.fileSystem == null) return grants;
+  const files = record(extra.fileSystem);
+  if (!files || Object.keys(files).some(key => !["read", "write", "entries", "globScanMaxDepth"].includes(key))) return null;
+  for (const access of ["write", "read"] as const) {
+    const list = files[access];
+    if (list == null) continue;
+    if (!Array.isArray(list) || list.some(x => typeof x !== "string")) return null;
+    if (list.length) grants.push(`${access} access to ${list.join(", ")}`);
+  }
+  if (files.entries != null) {
+    if (!Array.isArray(files.entries)) return null;
+    for (const value of files.entries) {
+      const entry = record(value); const path = record(entry?.path); const access = entry?.access;
+      if (!entry || !path || (access !== "read" && access !== "write" && access !== "deny")) return null;
+      const where = path.type === "path" && typeof path.path === "string" ? path.path
+        : path.type === "glob_pattern" && typeof path.pattern === "string" ? `files matching ${path.pattern}`
+        : path.type === "special" ? SPECIAL_PATHS[String(record(path.value)?.kind)] : undefined;
+      if (!where) return null;
+      grants.push(access === "deny" ? `no access to ${where}` : `${access} access to ${where}`);
+    }
+  }
+  return grants;
+}
+const SPECIAL_PATHS: Record<string, string> = { root: "the whole disk", minimal: "basic system files", project_roots: "the project folders",
+  tmpdir: "the temporary directory", slash_tmp: "/tmp" };
+
 const clip = (text: string, length = 1500) => text.length > length ? `${text.slice(0, length - 1)}…` : text;
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 
@@ -269,23 +306,21 @@ export class CodexRuntime implements Runtime {
       case "item/commandExecution/requestApproval": {
         // Everything the approval would grant is shown: the command, where it runs, and any extra network or file access.
         const network = record(params.networkApprovalContext); const extra = record(params.additionalPermissions);
-        const files = record(extra?.fileSystem); const paths = (value: unknown) => Array.isArray(value) ? value.filter(x => typeof x === "string") : [];
         // The request may omit the command; its item has it. An operation that cannot be shown in full is refused.
         const known = turn.commands.get(text(params.itemId) ?? "");
         const command = text(params.command) ?? known?.command ?? null; const cwd = text(params.cwd) ?? known?.cwd ?? null;
-        if (!command) return { decision: "decline" };
-        const where = [cwd && `in ${cwd}`, text(network?.host) && `network access to ${text(network?.host)}`,
-          record(extra?.network)?.enabled === true && "network access",
-          paths(files?.write).length && `write access to ${paths(files?.write).join(", ")}`,
-          paths(files?.read).length && `read access to ${paths(files?.read).join(", ")}`, text(params.reason)].filter(Boolean);
+        const grants = describeGrants(extra);
+        if (!command || grants === null) return { decision: "decline" };
+        const where = [cwd && `in ${cwd}`, text(network?.host) && `network access to ${text(network?.host)}`, ...grants, text(params.reason)].filter(Boolean);
         const detail = `${command}${where.length ? ` (${where.join("; ")})` : ""}`;
         const operation = params.kind === "writeStdin" ? "send input to a running command" : "run a command";
         return { decision: await turn.events.approval({ operation, detail }) ? "accept" : "decline" };
       }
       case "item/fileChange/requestApproval": {
+        // Approval is offered only when the files to be changed are known.
         const files = turn.files.get(text(params.itemId) ?? "") ?? []; const reason = text(params.reason); const root = text(params.grantRoot);
-        const detail = [files.join(", "), reason && (files.length ? `(${reason})` : reason), root && `(${root})`].filter(Boolean).join(" ")
-          || "file changes outside the workspace";
+        if (!files.length) return { decision: "decline" };
+        const detail = [files.join(", "), reason && `(${reason})`, root && `(write access under ${root})`].filter(Boolean).join(" ");
         return { decision: await turn.events.approval({ operation: "change files", detail }) ? "accept" : "decline" };
       }
       case "item/tool/call": {
