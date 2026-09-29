@@ -742,3 +742,42 @@ test("cancelling a job withdraws its unsent question", async t => {
   assert.ok(!transport.sent.some(x => x.startsWith("Job #1 asks")));
   assert.equal(store.outbox().find(x => x.text.startsWith("Job #1 asks"))?.status, "cancelled");
 });
+
+test("an answer written while its question is still being sent answers it", async t => {
+  const { engine, store, runtime, transport } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async () => ({ status: "needs_input", message: "Budget?" }));
+  await engine.runTasks();
+  let release!: () => void;
+  transport.send = async (_target, text) => { transport.sent.push(text); if (text.startsWith("Job #1 asks")) await new Promise<void>(r => { release = r; }); return { status: "sent", messageGuid: text }; };
+  const sending = engine.tick(); await flush();
+  engine.acceptPage("owner", page([message("about $1500", 2)]));
+  release(); await sending;
+  assert.deepEqual(store.tasks().map(x => [x.state, x.input]), [["routed", "about $1500"]]);
+});
+
+test("a follow-up sent before the job is routed joins its first turn", async t => {
+  const { engine, runtime, texts } = setup(t);
+  engine.acceptPage("owner", page([message("research a laptop"), message("#1 under $500", 2)]));
+  assert.equal(texts().at(-1), "Added to job #1.");
+  await engine.routeTasks(null); await engine.runTasks();
+  assert.match(runtime.calls[0]!.input, /research a laptop\nunder \$500$/);
+});
+
+test("a budget stop refuses an approval that was already pending", async t => {
+  const { engine, store, runtime, texts } = setup(t);
+  engine.acceptPage("owner", page([message("check the weather service")]));
+  await engine.routeTasks(null);
+  let events!: RuntimeEvents; let decision: boolean | undefined;
+  let finish!: (outcome: TurnOutcome) => void;
+  runtime.turns.push(async e => { events = e; void e.approval({ operation: "run a command", detail: "ls" }).then(d => { decision = d; });
+    return new Promise<TurnOutcome>(r => { finish = r; }); });
+  const { done } = await started(engine);
+  events.usage(5000); await flush();
+  assert.equal(decision, false);
+  assert.equal(store.approvals()[0]?.status, "denied");
+  engine.acceptPage("owner", page([message("approve A1", 2)]));
+  assert.equal(texts().at(-1), "Approval A1 is not pending.");
+  finish({ status: "interrupted" }); await done;
+});

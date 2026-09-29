@@ -127,13 +127,13 @@ export class Engine {
       }
     }
     // A reply to the runtime's one open question continues that job. With several open, ask once which.
-    // Only a message written after the question was delivered can be its answer.
+    // Only a message written after the question was sent (or while it was being sent) can be its answer.
     const asking = this.store.tasks(contact.id).filter(x => {
       const delivered = x.state === "waiting_contact" && x.waitingFor?.kind === "question"
-        ? this.store.sentAt(`task:${x.id}:turn:${x.usage.turns}:question`) : null;
+        ? this.store.dispatchedAt(`task:${x.id}:turn:${x.usage.turns}:question`) : null;
       return delivered !== null && delivered <= message.sentAt;
     });
-    if (asking.length === 1) { reply(this.followUp(asking[0]!, message.text)); return; }
+    if (asking.length === 1) { reply(this.followUp(contact, asking[0]!, message.text)); return; }
     if (asking.length > 1) { reply(`Which job is that for? Reply ${asking.map(x => `‘#${x.number} …’`).join(" or ")}.`); return; }
     this.retain(source, message.text, null);
   }
@@ -206,7 +206,7 @@ export class Engine {
       }
       case "followUp": {
         const task = tasks().find(x => x.number === command.id);
-        return task ? this.followUp(task, command.text) : `No open job #${command.id}.`;
+        return task ? this.followUp(contact, task, command.text) : `No open job #${command.id}.`;
       }
       case "pause": this.store.setSetting(`pause:${contact.id}`, command.scope); return command.scope === "all"
         ? "All Nori reminder messages are paused. Reply ‘resume’ to restart them. Native app alerts are unchanged."
@@ -221,7 +221,7 @@ export class Engine {
   }
 
   /** Adds contact input to an open runtime job. An answer to its question makes it ready to resume. */
-  private followUp(task: Task, text: string): string {
+  private followUp(contact: Contact, task: Task, text: string): string {
     const waiting = task.state === "waiting_contact" ? task.waitingFor?.kind : null;
     if (waiting === "question") {
       this.store.appendInput(task.id, text);
@@ -233,6 +233,11 @@ export class Engine {
       return `Added to job #${task.number}.`;
     }
     if (waiting === "limit" || waiting === "interrupted") return `Job #${task.number} is paused. Reply ‘continue #${task.number}’ to resume it first.`;
+    // A queued job that will run in the runtime keeps the follow-up for its first turn.
+    if (task.state === "queued" && task.failure === null && this.runtimeFor(contact)) {
+      this.store.appendInput(task.id, text);
+      return `Added to job #${task.number}.`;
+    }
     if (task.state === "queued") return `Job #${task.number} is queued and can't take follow-ups yet.`;
     return `No open job #${task.number}.`;
   }
@@ -485,7 +490,10 @@ export class Engine {
    */
   private interrupt(turn: ActiveTurn, why: WaitingFor): void {
     turn.limit ??= why;
-    for (const [id, resolve] of turn.approvals) { turn.approvals.delete(id); resolve(false); }
+    // Pending approvals are refused durably and their prompts withdrawn, not just answered false.
+    if (turn.approvals.size) this.commit(() => {
+      for (const approval of this.store.approvals()) if (turn.approvals.has(approval.id)) this.settle(approval, "denied");
+    });
     this.cancelTurn(turn.taskId);
   }
 

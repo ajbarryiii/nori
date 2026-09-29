@@ -99,7 +99,7 @@ export class Store {
           chat_id INTEGER NOT NULL, chat_guid TEXT NOT NULL, text TEXT NOT NULL, kind TEXT NOT NULL,
           timer_id INTEGER REFERENCES timers(id), revision INTEGER,
           status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL,
-          message_guid TEXT, reason TEXT, withdrawn INTEGER NOT NULL DEFAULT 0, sent_at INTEGER) STRICT;
+          message_guid TEXT, reason TEXT, withdrawn INTEGER NOT NULL DEFAULT 0, dispatched_at INTEGER) STRICT;
         CREATE INDEX outbox_pending ON outbox(status, available_at);
         PRAGMA user_version=2;
       `);
@@ -276,10 +276,13 @@ export class Store {
     this.db.prepare("UPDATE outbox SET withdrawn=1, status=CASE status WHEN 'pending' THEN 'cancelled' ELSE status END WHERE substr(dedup_key,1,?)=?")
       .run(prefix.length, prefix);
   }
-  /** When a message was confirmed sent, or null. */
-  sentAt(key: string): number | null {
-    const row = this.db.prepare("SELECT sent_at FROM outbox WHERE dedup_key=? AND status='sent'").get(key);
-    return row?.sent_at === null || row === undefined ? null : Number(row.sent_at);
+  /**
+   * When the latest send attempt of a message began, if it may have reached the contact (sending, sent, or uncertain).
+   * A reply written after this could be answering it.
+   */
+  dispatchedAt(key: string): number | null {
+    const row = this.db.prepare("SELECT dispatched_at FROM outbox WHERE dedup_key=? AND status IN ('sending','sent','uncertain')").get(key);
+    return row === undefined || row.dispatched_at === null ? null : Number(row.dispatched_at);
   }
   /** Removes input the runtime has accepted, keeping anything added since it was sent. */
   consumeInput(id: number, sent: string): void {
@@ -387,12 +390,12 @@ export class Store {
       this.cancelStaleTimerMessages();
       const item = this.outboxRows("WHERE status='pending' AND available_at<=? ORDER BY CASE kind WHEN 'reply' THEN 0 ELSE 1 END,id", now).find(eligible);
       if (!item) return null;
-      this.db.prepare("UPDATE outbox SET status='sending',attempts=attempts+1 WHERE id=?").run(item.id);
+      this.db.prepare("UPDATE outbox SET status='sending',attempts=attempts+1,dispatched_at=? WHERE id=?").run(now, item.id);
       return { ...item, status: "sending", attempts: item.attempts + 1 };
     });
   }
   finishSend(item: OutboxItem, result: SendOutcome, now: number): void {
-    if (result.status === "sent") this.db.prepare("UPDATE outbox SET status='sent',message_guid=?,sent_at=? WHERE id=? AND status='sending'").run(result.messageGuid, now, item.id);
+    if (result.status === "sent") this.db.prepare("UPDATE outbox SET status='sent',message_guid=? WHERE id=? AND status='sending'").run(result.messageGuid, item.id);
     else if (result.status === "not_started") {
       const delay = Math.min(15 * 60_000, 30_000 * 2 ** Math.min(item.attempts - 1, 5));
       this.db.prepare("UPDATE outbox SET status=CASE withdrawn WHEN 1 THEN 'cancelled' ELSE 'pending' END,available_at=?,reason=? WHERE id=? AND status='sending'")
