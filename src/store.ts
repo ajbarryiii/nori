@@ -22,6 +22,7 @@ export interface ApprovalRecord {
   operation: string;
   detail: string;
   status: "pending" | "approved" | "denied" | "expired";
+  createdAt: number;
   expiresAt: number;
 }
 
@@ -81,7 +82,8 @@ export class Store {
           tokens INTEGER NOT NULL DEFAULT 0, run_ms INTEGER NOT NULL DEFAULT 0, allowance INTEGER NOT NULL DEFAULT 1,
           UNIQUE (contact_id, number)) STRICT;
         CREATE TABLE approvals (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id), contact_id TEXT NOT NULL REFERENCES enrollments(contact_id),
-          operation TEXT NOT NULL, detail TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', expires_at INTEGER NOT NULL) STRICT;
+          operation TEXT NOT NULL, detail TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL) STRICT;
         CREATE TABLE tool_calls (id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks(id), call_id TEXT NOT NULL, tool TEXT NOT NULL,
           arguments TEXT NOT NULL, success INTEGER NOT NULL, result TEXT NOT NULL, at INTEGER NOT NULL, UNIQUE (task_id, call_id)) STRICT;
         CREATE TABLE timers (id INTEGER PRIMARY KEY, plugin_id TEXT NOT NULL, contact_id TEXT NOT NULL REFERENCES enrollments(contact_id),
@@ -255,15 +257,15 @@ export class Store {
     this.db.prepare("UPDATE tasks SET route=?,route_attempted=1 WHERE id=? AND state='queued'").run(decision ? JSON.stringify(decision) : null, id);
   }
 
-  addApproval(input: { taskId: number; contactId: string; operation: string; detail: string; expiresAt: number }): number {
-    return Number(this.db.prepare("INSERT INTO approvals(task_id,contact_id,operation,detail,expires_at) VALUES (?,?,?,?,?)")
-      .run(input.taskId, input.contactId, input.operation, input.detail, input.expiresAt).lastInsertRowid);
+  addApproval(input: { taskId: number; contactId: string; operation: string; detail: string; createdAt: number; expiresAt: number }): number {
+    return Number(this.db.prepare("INSERT INTO approvals(task_id,contact_id,operation,detail,created_at,expires_at) VALUES (?,?,?,?,?,?)")
+      .run(input.taskId, input.contactId, input.operation, input.detail, input.createdAt, input.expiresAt).lastInsertRowid);
   }
   approvals(contactId?: string): ApprovalRecord[] {
     const rows = contactId === undefined ? this.db.prepare("SELECT * FROM approvals ORDER BY id").all()
       : this.db.prepare("SELECT * FROM approvals WHERE contact_id=? ORDER BY id").all(contactId);
     return rows.map(row => ({ id: Number(row.id), taskId: Number(row.task_id), contactId: String(row.contact_id), operation: String(row.operation),
-      detail: String(row.detail), status: row.status as ApprovalRecord["status"], expiresAt: Number(row.expires_at) }));
+      detail: String(row.detail), status: row.status as ApprovalRecord["status"], createdAt: Number(row.created_at), expiresAt: Number(row.expires_at) }));
   }
   /** Settles a pending approval once. */
   settleApproval(id: number, status: "approved" | "denied" | "expired"): boolean {

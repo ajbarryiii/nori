@@ -527,3 +527,60 @@ test("a delegated task without a hint still runs, and a completed outcome withou
   assert.equal(store.tasks()[0]?.state, "failed");
   assert.equal(texts().at(-1), "Job #1 couldn't be finished: Pick the Pixel. (It reported no checks, so it is not marked done.)");
 });
+
+test("an approval reply only covers requests that existed when it was sent", async t => {
+  const { engine, store, runtime, advance } = setup(t);
+  engine.acceptPage("owner", page([message("check the weather service")]));
+  await engine.routeTasks(null);
+  const decisions: boolean[] = [];
+  runtime.turns.push(async events => {
+    decisions.push(await events.approval({ operation: "run a command", detail: "ls" }));
+    decisions.push(await events.approval({ operation: "run a command", detail: "rm notes.txt" }));
+    return { status: "completed", message: "ok", evidence: ["x"] };
+  });
+  const { done } = await started(engine);
+  advance(61 * 60_000); await engine.tick(); await flush();
+  assert.deepEqual(decisions, [false]);
+  engine.acceptPage("owner", page([message("approve #1", 2, { sentAt: epoch + 30 * 60_000 })]));
+  await flush();
+  assert.deepEqual(store.approvals().map(x => x.status), ["expired", "pending"]);
+  engine.acceptPage("owner", page([message("deny #1", 3, { sentAt: epoch + 62 * 60_000 })]));
+  await done;
+  assert.deepEqual(decisions, [false, false]);
+});
+
+test("a failed plugin dispatch stays queued for review instead of falling back to the runtime", async t => {
+  const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { reminders: 0.9 } };
+  const { engine, store, runtime } = setup(t, { ...withRuntime, jev });
+  engine.acceptPage("owner", page([message(`please note ${"x".repeat(4001)}`)]));
+  await engine.routeTasks({ classify: async () => ({ model: "jev-test", catalogVersion: "v", route: { kind: "action", pluginId: "reminders" },
+    confidence: 1, probabilities: {}, multiAction: false }) });
+  assert.deepEqual([store.tasks()[0]?.state, store.tasks()[0]?.failure], ["queued", "reminders: invalid command"]);
+  await engine.routeTasks(null); await engine.runTasks();
+  assert.deepEqual(runtime.calls, []);
+});
+
+test("the runtime's own tool actions count against the tool-call budget", async t => {
+  const { engine, store, runtime } = setup(t);
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async events => { events.activity(); events.activity(); events.activity(); return { status: "interrupted" }; });
+  await engine.runTasks();
+  assert.equal(store.tasks()[0]?.usage.toolCalls, 3);
+  assert.deepEqual(runtime.cancelled, [store.tasks()[0]!.id]);
+  assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "toolCalls" });
+});
+
+test("budgets and approval expiry are enforced while a send is still in flight", async t => {
+  const { engine, store, runtime, transport, advance } = setup(t);
+  transport.send = () => new Promise(() => {});
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  held(runtime);
+  const { done } = await started(engine);
+  void engine.tick(); await flush();
+  advance(31 * 60_000);
+  engine.maintain();
+  await done;
+  assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "minutes" });
+});

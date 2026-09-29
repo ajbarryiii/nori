@@ -106,7 +106,7 @@ export class Engine {
       timer: null, sourceGuid: message.guid };
     const reply = (text: string) => this.enqueue(source, `reply:${message.guid}`, text);
     const command = parseEngineCommand(message.text);
-    if (command) { reply(this.command(contact, command)); return; }
+    if (command) { reply(this.command(contact, command, message.sentAt)); return; }
     // Grammars consume the entire message, so a compound request never reaches one.
     if (!isCompound(message.text)) {
       const context = { contact, time: message.sentAt, timezone: this.config.timezone };
@@ -152,7 +152,8 @@ export class Engine {
   }
   private tell(contact: Contact, key: string, text: string): void { this.enqueue({ contact, now: this.clock() }, key, text); }
 
-  private command(contact: Contact, command: EngineCommand): string {
+  /** `sentAt` is when the contact wrote the command; consent covers only approvals that existed then. */
+  private command(contact: Contact, command: EngineCommand, sentAt: number): string {
     const tasks = () => this.store.tasks(contact.id);
     switch (command.kind) {
       case "cancel": {
@@ -173,7 +174,7 @@ export class Engine {
         const number = (approval: ApprovalRecord) => this.store.task(approval.taskId)!.number;
         const overdue = this.store.approvals(contact.id).filter(x => x.status === "pending" && x.expiresAt <= this.clock());
         for (const approval of overdue) this.settle(approval, "expired");
-        const pending = this.store.approvals(contact.id).filter(x => x.status === "pending")
+        const pending = this.store.approvals(contact.id).filter(x => x.status === "pending" && x.createdAt <= sentAt)
           .map(approval => ({ approval, number: number(approval) }))
           .filter(x => command.id === null || x.number === command.id);
         if (command.id === null && new Set(pending.map(x => x.number)).size > 1)
@@ -275,13 +276,18 @@ export class Engine {
       || (fresh && this.store.daily("runtime-tasks", day) >= limits.daily.tasks));
   }
 
+  /** Approval expiry and runtime budgets. Runs on every poll, independently of a send batch that may be in flight. */
+  maintain(): void {
+    this.expireApprovals();
+    this.enforceTime();
+  }
+
   async tick(): Promise<void> {
+    this.maintain();
     if (this.sending) return;
     this.sending = true;
     try {
       const contacts = this.activeContacts();
-      this.expireApprovals();
-      this.enforceTime();
       this.fireTimers(contacts);
       const active = new Set(contacts.map(c => c.id));
       // Bounded batch; recheck controls and timer revisions before each external send.
@@ -338,7 +344,8 @@ export class Engine {
       // The task is already claimed, so finish it even if the lifecycle gate closed meanwhile; it would never be routed again.
       const plugin = decision && this.actionFor(contact, task, decision);
       if (plugin) await this.dispatchTask(contact, task, plugin);
-      if (this.runtimeFor(contact)) this.store.updateTask(task.id, { state: "routed" }, ["queued"]);
+      // A retained plugin failure stays queued for review rather than being retried in the runtime.
+      if (this.runtimeFor(contact) && this.store.task(task.id)?.failure === null) this.store.updateTask(task.id, { state: "routed" }, ["queued"]);
     }
   }
 
@@ -424,6 +431,12 @@ export class Engine {
         try { return await this.callTool(task.id, contact, turn, call); }
         catch { return { success: false, text: "The tool failed." }; }
       },
+      activity: () => {
+        if (!live()) return;
+        const current = this.store.task(task.id)!; const toolCalls = current.usage.toolCalls + 1;
+        this.store.updateTask(task.id, { usage: { toolCalls } });
+        if (toolCalls > this.config.runtime!.budget.toolCalls * current.usage.allowance) this.interrupt(turn, { kind: "limit", limit: "toolCalls" });
+      },
       usage: total => {
         if (!live() || !Number.isSafeInteger(total) || total < 0) return;
         const current = this.store.task(task.id)!; const limits = this.config.runtime!;
@@ -490,7 +503,8 @@ export class Engine {
       const task = this.store.task(taskId);
       if (!task || !this.open(taskId, turn)) return;
       this.stopClock(turn);
-      approvalId = this.store.addApproval({ taskId, contactId: contact.id, operation, detail, expiresAt: now + limits.approvalMinutes * 60_000 });
+      approvalId = this.store.addApproval({ taskId, contactId: contact.id, operation, detail, createdAt: now,
+        expiresAt: now + limits.approvalMinutes * 60_000 });
       this.store.updateTask(taskId, { state: "waiting_contact", waitingFor: { kind: "approval" } });
       this.tell(contact, `approval:${approvalId}`, `Job #${task.number} needs your OK to ${operation}: ${detail}\n`
         + `Reply ‘approve #${task.number}’ or ‘deny #${task.number}’ within ${limits.approvalMinutes} minutes.`);

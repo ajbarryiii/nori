@@ -10,6 +10,8 @@ import { epoch } from "./helpers.js";
 class FakeCodex implements RpcPort {
   requests: Array<{ method: string; params: Record<string, unknown> }> = [];
   notes: string[] = [];
+  closed = 0;
+  failTurnStart = false;
   private threads = 0; private turns = 0;
   constructor(readonly handlers: RpcHandlers) {}
   async request(method: string, params: Record<string, unknown>) {
@@ -17,12 +19,13 @@ class FakeCodex implements RpcPort {
     if (method === "initialize") return { userAgent: "codex-test", codexHome: "/tmp/codex", platformFamily: "unix", platformOs: "macos" };
     if (method === "thread/start") return { thread: { id: `th-${++this.threads}` } };
     if (method === "thread/resume") return { thread: { id: params.threadId } };
+    if (method === "turn/start" && this.failTurnStart) throw new Error("RPC request timed out.");
     if (method === "turn/start") return { turn: { id: `tu-${++this.turns}`, status: "inProgress", items: [] } };
     if (method === "turn/interrupt") return {};
     throw new Error(`unexpected ${method}`);
   }
   notify(method: string) { this.notes.push(method); }
-  close() { this.handlers.closed?.(); }
+  close() { this.closed++; this.handlers.closed?.(); }
   emit(method: string, params: Record<string, unknown>) { this.handlers.notification?.(method, params); }
   ask(method: string, params: Record<string, unknown>) { return this.handlers.request!(method, params); }
   finish(threadId: string, turnId: string, text: string, status = "completed", error: unknown = null) {
@@ -44,13 +47,14 @@ function setup(t: { after(fn: () => void): void }) {
   const connections: FakeCodex[] = [];
   const runtime = new CodexRuntime({ connect: handlers => { const c = new FakeCodex(handlers); connections.push(c); return c; },
     model: "gpt-test", workspaceDir: dir, timezone: "America/Los_Angeles", clock: () => epoch });
-  const seen = { started: [] as unknown[], approvals: [] as unknown[], tools: [] as unknown[], usage: [] as number[] };
+  const seen = { started: [] as unknown[], approvals: [] as unknown[], tools: [] as unknown[], usage: [] as number[], activity: 0 };
   let approve = true;
   const events: RuntimeEvents = {
     started: ids => { seen.started.push(ids); },
     approval: async request => { seen.approvals.push(request); return approve; },
     tool: async call => { seen.tools.push(call); return { success: true, text: "Saved." }; },
     usage: tokens => { seen.usage.push(tokens); },
+    activity: () => { seen.activity++; },
   };
   return { dir, runtime, connections, conn: () => connections.at(-1)!, events, seen, setApprove: (value: boolean) => { approve = value; } };
 }
@@ -72,7 +76,7 @@ test("start opts into the experimental API once, sandboxes a private thread with
   const turn = conn().requests[2]!.params;
   assert.deepEqual(turn.input, [{ type: "text", text: "request 1", text_elements: [] }]);
   assert.deepEqual((turn.outputSchema as { required: string[] }).required, ["outcome", "message", "evidence"]);
-  assert.deepEqual(seen.started, [{ threadId: "th-1", turnId: "tu-1" }]);
+  assert.deepEqual(seen.started, [{ threadId: "th-1", turnId: null }, { threadId: "th-1", turnId: "tu-1" }]);
   conn().emit("thread/tokenUsage/updated", { threadId: "th-1", turnId: "tu-1", tokenUsage: { total: { totalTokens: 1234 }, last: { totalTokens: 1234 } } });
   conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "Done.", evidence: ["Checked the file"] }));
   assert.deepEqual(await done, { status: "completed", message: "Done.", evidence: ["Checked the file"] });
@@ -198,6 +202,30 @@ test("approval prompts show the files, network hosts, and extra access being aut
     { operation: "run a command", detail: "curl https://api.example.com (in /w; network access to api.example.com; network access; write access to /Users/receipts/Documents)" },
     { operation: "send input to a running command", detail: "yes (in /w)" },
   ]);
+  conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
+  await done;
+});
+
+test("an ambiguous turn start closes the connection so the turn cannot keep running untracked", async t => {
+  const { runtime, connections, events, seen } = setup(t);
+  const first = runtime.start(task(1), [], events);
+  await flush();
+  connections[0]!.failTurnStart = true;
+  const second = runtime.resume(task(2, "th-7"), "more", [], events);
+  connections[0]!.finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
+  await first;
+  await assert.rejects(second);
+  assert.equal(connections[0]!.closed, 1);
+  assert.deepEqual(seen.started.slice(-1), [{ threadId: "th-7", turnId: null }]);
+});
+
+test("Codex's own tool actions are reported as activity; plugin tool calls are not", async t => {
+  const { runtime, conn, events, seen } = setup(t);
+  const done = runtime.start(task(1), [], events); await flush();
+  const ids = { threadId: "th-1", turnId: "tu-1", startedAtMs: 0 };
+  for (const type of ["commandExecution", "fileChange", "webSearch", "mcpToolCall", "dynamicToolCall", "agentMessage", "reasoning"])
+    conn().emit("item/started", { ...ids, item: { type, id: type, changes: [] } });
+  assert.equal(seen.activity, 4);
   conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
   await done;
 });

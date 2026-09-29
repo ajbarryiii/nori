@@ -89,6 +89,7 @@ export async function runService(options: { config: Config; store: Store; transp
       if (failure) throw failure;
       caughtUp = false;
       caughtUp = await catchUp(store, core, transport, checkIdentity);
+      core.maintain();
       if (caughtUp && !signal.aborted && !failure) {
         sending ??= core.tick().catch(error => { failure = error; }).finally(() => { sending = null; });
         if (router || (runtime && config.runtime))

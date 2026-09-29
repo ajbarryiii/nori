@@ -42,6 +42,8 @@ const OUTPUT_SCHEMA = {
   required: ["outcome", "message", "evidence"],
   additionalProperties: false,
 };
+/** Codex's own tool actions, which count against the tool-call budget. Plugin tool calls are counted by the broker. */
+const NATIVE_TOOLS = new Set(["commandExecution", "fileChange", "webSearch", "mcpToolCall", "imageGeneration", "imageView", "collabAgentToolCall"]);
 /** Streaming detail Nori never forwards; opting out keeps the stdio buffer small. */
 const QUIET = ["item/agentMessage/delta", "item/plan/delta", "item/reasoning/summaryTextDelta", "item/reasoning/summaryPartAdded",
   "item/reasoning/textDelta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/fileChange/patchUpdated",
@@ -92,6 +94,7 @@ export class CodexRuntime implements Runtime {
       const threadId = text(record(response?.thread)?.id);
       if (!threadId) throw new Error("Codex did not return a thread.");
       connection.loaded.add(threadId);
+      this.persist(events, threadId);
       if (run.cancelled) return { status: "interrupted" };
       return this.turn(connection, task.id, threadId, task.text, events);
     } finally { this.starting.delete(task.id); }
@@ -107,9 +110,15 @@ export class CodexRuntime implements Runtime {
         await connection.rpc.request("thread/resume", { threadId: task.threadId, ...this.settings(task.id), excludeTurns: true });
         connection.loaded.add(task.threadId);
       }
+      this.persist(events, task.threadId);
       if (run.cancelled) return { status: "interrupted" };
       return this.turn(connection, task.id, task.threadId, input, events);
     } finally { this.starting.delete(task.id); }
+  }
+
+  /** Reports the thread as soon as it exists, before any turn, so a failed start can still be resumed rather than repeated. */
+  private persist(events: RuntimeEvents, threadId: string): void {
+    try { events.started({ threadId, turnId: null }); } catch { /* Persisting ids is best effort here. */ }
   }
 
   private begin(taskId: number): { cancelled: boolean } {
@@ -204,8 +213,10 @@ export class CodexRuntime implements Runtime {
         })
         .catch(error => {
           if (this.turns.get(threadId) !== turn) return;
+          // Codex may have started the turn anyway. Closing the connection stops it, so it cannot keep running untracked.
           this.turns.delete(threadId);
           reject(error instanceof Error ? error : new Error("Codex could not start the turn."));
+          if (this.connection === connection) this.close();
         });
     });
   }
@@ -221,6 +232,10 @@ export class CodexRuntime implements Runtime {
     const threadId = text(params.threadId); const turn = threadId ? this.turns.get(threadId) : undefined;
     if (!turn) return;
     const item = record(params.item);
+    if (method === "item/started" && typeof item?.type === "string" && NATIVE_TOOLS.has(item.type)) {
+      try { turn.events.activity(); } catch { /* Budgets are enforced by the engine. */ }
+    }
+    if (method === "turn/started") { const turnId = text(record(params.turn)?.id); if (turnId) this.announce(turn, turnId); }
     if ((method === "item/started" || method === "item/completed") && item?.type === "fileChange" && typeof item.id === "string" && Array.isArray(item.changes))
       turn.files.set(item.id, item.changes.map(change => {
         const entry = record(change); const kind = record(entry?.kind); const moved = text(kind?.move_path);

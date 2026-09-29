@@ -307,8 +307,10 @@ export interface RuntimeTool {
 }
 
 export interface RuntimeEvents {
-  /** Called as soon as the thread and turn exist, so a restart can find them. */
-  started(ids: { threadId: string; turnId: string }): void;
+  /** Called as soon as the thread exists (turnId null), and again once the turn exists, so a restart can find them. */
+  started(ids: { threadId: string; turnId: string | null }): void;
+  /** The runtime began one of its own tool actions (a command, file change, or web search). Counts against the tool-call budget. */
+  activity(): void;
   /** Holds the turn until the contact decides. Resolves false on deny, expiry, or cancellation. */
   approval(request: { operation: string; detail: string }): Promise<boolean>;
   /** Runs an exported plugin tool for the task's contact. Never throws. */
