@@ -99,7 +99,7 @@ export class Store {
           chat_id INTEGER NOT NULL, chat_guid TEXT NOT NULL, text TEXT NOT NULL, kind TEXT NOT NULL,
           timer_id INTEGER REFERENCES timers(id), revision INTEGER,
           status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL,
-          message_guid TEXT, reason TEXT) STRICT;
+          message_guid TEXT, reason TEXT, withdrawn INTEGER NOT NULL DEFAULT 0) STRICT;
         CREATE INDEX outbox_pending ON outbox(status, available_at);
         PRAGMA user_version=2;
       `);
@@ -221,10 +221,7 @@ export class Store {
     this.db.prepare(`UPDATE tasks SET state='routed' WHERE state='queued' AND route_attempted=1 AND failure IS NULL
       AND contact_id IN (${contactIds.map(() => "?").join(",")})`).run(...contactIds);
   }
-    nextRoutedTask(contactIds: readonly string[]): Task | null {
-    if (!contactIds.length) return null;
-    return this.taskRows(`WHERE state='routed' AND contact_id IN (${contactIds.map(() => "?").join(",")})`, ...contactIds)[0] ?? null;
-  }
+  
   setTaskFailure(id: number, failure: string): void {
     this.db.prepare("UPDATE tasks SET failure=? WHERE id=?").run(failure, id);
   }
@@ -267,9 +264,12 @@ export class Store {
     return rows.map(row => ({ id: Number(row.id), taskId: Number(row.task_id), contactId: String(row.contact_id), operation: String(row.operation),
       detail: String(row.detail), status: row.status as ApprovalRecord["status"], createdAt: Number(row.created_at), expiresAt: Number(row.expires_at) }));
   }
-  /** Withdraws an unsent message, for example a prompt that can no longer be answered. */
+  /**
+   * Withdraws an unsent message, for example a prompt that can no longer be answered. A message already being sent keeps
+   * its delivery tracking, but is cancelled rather than retried if the transport reports it never went out.
+   */
   cancelOutbox(key: string): void {
-    this.db.prepare("UPDATE outbox SET status='cancelled' WHERE dedup_key=? AND status='pending'").run(key);
+    this.db.prepare("UPDATE outbox SET withdrawn=1, status=CASE status WHEN 'pending' THEN 'cancelled' ELSE status END WHERE dedup_key=?").run(key);
   }
   /** Removes input the runtime has accepted, keeping anything added since it was sent. */
   consumeInput(id: number, sent: string): void {
@@ -385,7 +385,8 @@ export class Store {
     if (result.status === "sent") this.db.prepare("UPDATE outbox SET status='sent',message_guid=? WHERE id=? AND status='sending'").run(result.messageGuid, item.id);
     else if (result.status === "not_started") {
       const delay = Math.min(15 * 60_000, 30_000 * 2 ** Math.min(item.attempts - 1, 5));
-      this.db.prepare("UPDATE outbox SET status='pending',available_at=?,reason=? WHERE id=? AND status='sending'").run(now + delay, result.reason, item.id);
+      this.db.prepare("UPDATE outbox SET status=CASE withdrawn WHEN 1 THEN 'cancelled' ELSE 'pending' END,available_at=?,reason=? WHERE id=? AND status='sending'")
+        .run(now + delay, result.reason, item.id);
     } else this.db.prepare("UPDATE outbox SET status='uncertain',reason=? WHERE id=? AND status='sending'").run(result.reason, item.id);
   }
   recoverInFlight(): void { this.db.exec("UPDATE outbox SET status='uncertain',reason='Service stopped during send' WHERE status='sending'"); }

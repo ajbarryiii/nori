@@ -1,4 +1,4 @@
-import type { ActionPlugin, Budget, Clarification, Command, Config, Contact, IntentRouter, Message, MessagePage, MessageTransport,
+import type { ActionPlugin, Budget, OutboxItem, Clarification, Command, Config, Contact, IntentRouter, Message, MessagePage, MessageTransport,
   RoutingDecision, Runtime, RuntimeEvents, SendOutcome, Task, TurnOutcome, WaitingFor } from "./contracts.js";
 import { normalizeHandle, record } from "./config.js";
 import { checkPlugins, isClarification, PluginHost, type DispatchSource } from "./host.js";
@@ -296,11 +296,17 @@ export class Engine {
       const contacts = this.activeContacts();
       this.fireTimers(contacts);
       const active = new Set(contacts.map(c => c.id));
+      // A timer message is held while its plugin is not permitted, even if it fired before the permission was revoked.
+      const permitted = (item: OutboxItem) => {
+        const contact = contacts.find(c => c.id === item.contactId);
+        const timer = item.timerId === null ? null : this.store.timers(item.contactId).find(x => x.id === item.timerId);
+        return !!contact && !!timer && !!this.host.permits(contact, timer.pluginId);
+      };
       // Bounded batch; recheck controls and timer revisions before each external send.
       for (let n = 0; n < 10; n++) {
         const now = this.clock(); const quiet = inQuietHours(now, this.config.timezone, this.config.quietHours);
         const item = this.store.claimOutgoing(now, item => active.has(item.contactId)
-          && (item.kind === "reply" || (!quiet && this.store.setting(`pause:${item.contactId}`) !== "all")));
+          && (item.kind === "reply" || (!quiet && this.store.setting(`pause:${item.contactId}`) !== "all" && permitted(item))));
         if (!item) break;
         let result: SendOutcome;
         try { result = await this.transport.send(item.target, item.text); }
@@ -396,14 +402,15 @@ export class Engine {
     const runtime = this.runtime; const limits = this.config.runtime;
     if (!runtime || !limits || this.active.size || !shouldContinue()) return;
     const contacts = this.activeContacts().filter(c => this.runtimeFor(c));
-    const task = this.store.nextRoutedTask(contacts.map(c => c.id));
+    // The oldest job the daily limits allow: a new job blocked by the task limit does not hold up jobs resuming a thread.
+    const task = this.store.tasks().find(x => x.state === "routed" && contacts.some(c => c.id === x.contactId)
+      && !this.dailyLimitReached(x.threadId === null));
     if (!task) return;
     const contact = contacts.find(c => c.id === task.contactId)!;
     const fresh = task.threadId === null;
-    if (this.dailyLimitReached(fresh)) return;
     // Every budget is checked before a turn starts, so no reply can start work past a limit without `continue #n`.
     const { usage } = task; const budget = limits.budget; const allowance = usage.allowance;
-    const exhausted = usage.tokens > budget.tokens * allowance ? "tokens" : usage.toolCalls >= budget.toolCalls * allowance ? "toolCalls"
+    const exhausted = usage.tokens >= budget.tokens * allowance ? "tokens" : usage.toolCalls >= budget.toolCalls * allowance ? "toolCalls"
       : usage.runMs >= budget.minutes * 60_000 * allowance ? "minutes" : usage.turns >= budget.turns * allowance ? "turns" : null;
     if (exhausted) {
       this.commit(() => {

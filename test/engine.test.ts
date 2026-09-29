@@ -266,3 +266,27 @@ test("help lists permitted plugin examples and stop reports that nothing is runn
   assert.match(store.outbox()[1]!.text, /Nothing is running/);
   assert.equal(store.tasks().length, 0);
 });
+
+test("a fired timer's queued message is held while its plugin is not permitted", async t => {
+  const store = new Store(":memory:"); t.after(() => store.close()); enroll(store);
+  const transport = new FakeTransport(); let now = epoch;
+  const engine = new Engine(config, store, transport, { clock: () => now });
+  engine.acceptPage("owner", page([message("remind me to stretch in 1 minute"), message("pause all", 2)]));
+  now += 60_000; await engine.tick();
+  const revoked = new Engine({ ...config, contacts: [{ ...owner, plugins: [] }] }, store, transport, { clock: () => now });
+  revoked.acceptPage("owner", page([message("resume", 3)]));
+  await revoked.tick();
+  assert.equal(transport.sent.filter(x => x.startsWith("Reminder")).length, 0);
+  await engine.tick();
+  assert.equal(transport.sent.filter(x => x.startsWith("Reminder")).length, 1);
+});
+
+test("a message withdrawn while it is being sent is not retried", t => {
+  const store = new Store(":memory:"); t.after(() => store.close()); enroll(store);
+  store.enqueue({ key: "approval:1", contactId: "owner", target: owner.conversation, text: "Approve?", kind: "reply", timer: null }, epoch);
+  const item = store.claimOutgoing(epoch, () => true)!;
+  store.cancelOutbox("approval:1");
+  store.finishSend(item, { status: "not_started", reason: "offline" }, epoch);
+  assert.equal(store.outbox()[0]?.status, "cancelled");
+  assert.equal(store.claimOutgoing(epoch + 3_600_000, () => true), null);
+});

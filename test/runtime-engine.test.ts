@@ -689,3 +689,30 @@ test("unsent approval prompts are withdrawn when the turn ends or Nori restarts"
     assert.equal(store.outbox().find(x => x.text.includes("needs your OK"))?.status, "cancelled", ending);
   }
 });
+
+test("a fresh job blocked by the daily limit does not stall jobs that resume existing threads", async t => {
+  const { engine, store, runtime } = setup(t, { ...withRuntime, runtime: { ...runtimeConfig, daily: { tasks: 2, tokens: 5000 } } });
+  engine.acceptPage("owner", page([message("research a laptop"), message("research a phone", 2)]));
+  await engine.routeTasks(null);
+  const start = runtime.start.bind(runtime);
+  runtime.start = async (task, tools, events) => { if (task.number === 1) throw new Error("turn/start timed out"); return start(task, tools, events); };
+  await engine.runTasks();
+  runtime.turns.push(async () => ({ status: "needs_input", message: "Carrier?" }));
+  await engine.runTasks();
+  engine.acceptPage("owner", page([message("continue #1", 3), message("#2 Verizon", 4)]));
+  assert.deepEqual(store.tasks().map(x => [x.state, x.threadId]), [["routed", null], ["routed", "thread-2"]]);
+  await engine.runTasks();
+  assert.deepEqual(runtime.calls.at(-1), { kind: "resume", task: store.tasks()[1]!.id, input: "Verizon", tools: runtime.calls.at(-1)!.tools, threadId: "thread-2" });
+});
+
+test("reaching the token limit exactly still requires continue", async t => {
+  const { engine, store, runtime } = setup(t);
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  runtime.turns.push(async events => { events.usage(1000); return { status: "needs_input", message: "Which room?" }; });
+  await engine.runTasks();
+  engine.acceptPage("owner", page([message("kitchen", 2)]));
+  await engine.runTasks();
+  assert.equal(runtime.calls.length, 1);
+  assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "tokens" });
+});

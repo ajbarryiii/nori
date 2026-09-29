@@ -74,7 +74,8 @@ test("start opts into the experimental API once, sandboxes a private thread with
   assert.match(String(thread.developerInstructions), /America\/Los_Angeles/);
   assert.match(String(thread.developerInstructions), /untrusted/);
   const turn = conn().requests[2]!.params;
-  assert.deepEqual(turn.input, [{ type: "text", text: "request 1", text_elements: [] }]);
+  assert.deepEqual(turn.input, [{ type: "text", text_elements: [],
+    text: "This request was sent at 2026-09-28T16:00:00.000Z (the person's timezone is America/Los_Angeles).\n\nrequest 1" }]);
   assert.deepEqual((turn.outputSchema as { required: string[] }).required, ["outcome", "message", "evidence"]);
   assert.deepEqual(seen.started, [{ threadId: "th-1", turnId: null }, { threadId: "th-1", turnId: "tu-1" }]);
   conn().emit("thread/tokenUsage/updated", { threadId: "th-1", turnId: "tu-1", tokenUsage: { total: { totalTokens: 1234 }, last: { totalTokens: 1234 } } });
@@ -234,4 +235,14 @@ test("a thread id that cannot be saved stops the turn from starting", async t =>
   const { runtime, conn, events } = setup(t);
   await assert.rejects(runtime.start(task(1), [], { ...events, started: () => { throw new Error("disk full"); } }), /disk full/);
   assert.ok(!conn().requests.some(r => r.method === "turn/start"));
+});
+
+test("a new job tells Codex when the request was sent", async t => {
+  const { runtime, conn, events } = setup(t);
+  const done = runtime.start({ ...task(1), time: Date.parse("2026-09-28T16:00:00Z") }, [], events); await flush();
+  const input = (conn().requests.find(r => r.method === "turn/start")!.params.input as Array<{ text: string }>)[0]!.text;
+  assert.match(input, /2026-09-28T16:00:00\.000Z/);
+  assert.match(input, /request 1$/);
+  conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
+  await done;
 });

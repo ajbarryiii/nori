@@ -96,7 +96,9 @@ export class CodexRuntime implements Runtime {
       connection.loaded.add(threadId);
       this.persist(events, threadId);
       if (run.cancelled) return { status: "interrupted" };
-      return this.turn(connection, task.id, threadId, task.text, events);
+      // The send time anchors relative dates such as "tomorrow" for jobs that start late.
+      const sent = `This request was sent at ${new Date(task.time).toISOString()} (the person's timezone is ${this.options.timezone}).`;
+      return this.turn(connection, task.id, threadId, `${sent}\n\n${task.text}`, events);
     } finally { this.starting.delete(task.id); }
   }
 
