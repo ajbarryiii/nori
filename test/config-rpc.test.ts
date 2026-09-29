@@ -100,3 +100,9 @@ test("stdio RPC times out and rejects outstanding requests when child exits", as
   await assert.rejects(rpc.request("hang", {}), /timed out/);
   await assert.rejects(rpc.request("exit", {}), /closed/);
 });
+
+test("direct chats may use the newer any;-; GUID prefix; groups and SMS stay rejected", () => {
+  const guid = (chatGuid: string) => ({ ...input, contacts: [{ ...contact, conversation: { chatId: 42, chatGuid } }] });
+  assert.equal(parseConfig(guid("any;-;owner@example.com")).contacts[0]?.conversation.chatGuid, "any;-;owner@example.com");
+  for (const bad of ["any;+;chat123", "SMS;-;+15555550123", "iMessage;+;chat123"]) assert.throws(() => parseConfig(guid(bad)), bad);
+});

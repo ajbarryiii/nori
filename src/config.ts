@@ -23,7 +23,8 @@ function parseContact(value: unknown, index: number): Contact {
   const handles = [...new Set((value.handles as string[]).map(normalizeHandle))];
   const chat = value.conversation;
   if (!record(chat) || !Number.isSafeInteger(chat.chatId) || (chat.chatId as number) <= 0) throw new Error(`Invalid chatId for contact ${id}.`);
-  if (typeof chat.chatGuid !== "string" || !chat.chatGuid.startsWith("iMessage;-;"))
+  // Direct chats only (`;-;`). Newer macOS versions name them `any;-;…` instead of `iMessage;-;…`.
+  if (typeof chat.chatGuid !== "string" || !/^(?:iMessage|any);-;\S+$/.test(chat.chatGuid))
     throw new Error(`Configure an iMessage direct-chat GUID for contact ${id}.`);
   if (value.role !== "owner" && value.role !== "member") throw new Error(`Contact ${id} needs role "owner" or "member".`);
   if (!Array.isArray(value.plugins) || value.plugins.some(x => typeof x !== "string"))

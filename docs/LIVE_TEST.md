@@ -39,7 +39,7 @@ npm run demo        # synthetic run; sends nothing
    imsg chats --json
    ```
 
-   Record the chat's numeric `id` and its `guid` (it starts with `iMessage;-;`). Also record the exact `sender` handle your phone uses: an email address, or a phone number in `+1…` form.
+   Record the chat's numeric `id` and its `guid` (it starts with `iMessage;-;` or, on newer macOS, `any;-;`). Also record the exact `sender` handle your phone uses: an email address, or a phone number in `+1…` form.
 
 ## 3. Configure
 
