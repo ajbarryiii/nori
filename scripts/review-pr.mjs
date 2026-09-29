@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -58,14 +58,73 @@ function show(report, path, cached = false) {
   for (const limitation of report.review.limitations) console.log(`Limitation: ${limitation}`);
   console.log(`Report: ${path}`);
 }
+const signal = (pid, name) => { try { process.kill(pid, name); } catch { /* Already gone. */ } };
+/** Every process's parent and start time. The start time keeps a reused process id from being mistaken for another. */
+function processTable() {
+  return new Promise((resolve, reject) => execFile('ps', ['-A', '-o', 'pid=,ppid=,stat=,lstart='], { env: childEnv, maxBuffer: 16 * 1024 * 1024 },
+    (error, stdout) => {
+      if (error) { reject(error); return; }
+      const table = new Map();
+      for (const line of stdout.split('\n')) {
+        const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
+        if (row) table.set(Number(row[1]), { parent: Number(row[2]), exited: row[3].startsWith('Z'), start: row[4] });
+      }
+      resolve(table);
+    }));
+}
+/**
+ * Pauses the reviewer and all its descendants, including tool commands in their own sessions that a process-group signal
+ * misses, then kills them all and waits until none is running. `uncollected` reports whether `root` is still a child this
+ * process has not collected, so its id cannot belong to anything else. Returns whether every process was confirmed stopped.
+ */
+async function stopTree(root, uncollected) {
+  if (!uncollected()) return true;
+  signal(root, 'SIGSTOP');
+  const found = new Map();
+  try {
+    for (let round = 0; round < 50; round++) {
+      const table = await processTable();
+      const start = table.get(root)?.start;
+      if (!uncollected()) found.delete(root); else if (start !== undefined && !found.has(root)) found.set(root, start);
+      let added = false; let grew = true;
+      while (grew) {
+        grew = false;
+        for (const [pid, entry] of table) {
+          if (found.has(pid) || !found.has(entry.parent) || table.get(entry.parent)?.start !== found.get(entry.parent)) continue;
+          signal(pid, 'SIGSTOP'); found.set(pid, entry.start); added = grew = true;
+        }
+      }
+      if (!added) break;
+    }
+    for (let round = 0; round < 40 && found.size; round++) {
+      const table = await processTable();
+      for (const [pid, start] of found) {
+        const entry = table.get(pid);
+        if (!entry || entry.start !== start || entry.exited || (pid === root && !uncollected())) found.delete(pid);
+        else signal(pid, 'SIGKILL');
+      }
+      if (found.size) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    return found.size === 0;
+  } catch {
+    for (const pid of found.keys()) if (pid !== root || uncollected()) signal(pid, 'SIGKILL');
+    return false;
+  }
+}
+/** Rejects with `unconfirmed` set when a stopped review's processes could not be confirmed stopped. */
 function runCodex(command, args, options, timeout) {
   return new Promise((resolve, reject) => {
     const { input, ...spawnOptions } = options;
     const child = spawn(command, args, { ...spawnOptions, detached: true });
-    let failure;
+    let failure; let stopping = null;
     const terminate = () => {
-      if (!child.pid) return;
-      try { process.kill(-child.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') failure ??= error; }
+      if (!child.pid || stopping) return;
+      const uncollected = () => child.exitCode === null && child.signalCode === null;
+      stopping = stopTree(child.pid, uncollected).then(stopped => {
+        // The process group is the fallback when the process list is unavailable.
+        if (!stopped && uncollected()) signal(-child.pid, 'SIGKILL');
+        return stopped;
+      });
     };
     const timer = setTimeout(() => { failure = new Error('Astra review timed out.'); terminate(); }, timeout);
     const interrupt = () => { failure = new Error('Astra review interrupted.'); terminate(); };
@@ -74,9 +133,11 @@ function runCodex(command, args, options, timeout) {
       clearTimeout(timer); process.removeListener('SIGINT', interrupt); process.removeListener('SIGTERM', interrupt);
     };
     child.once('error', error => { cleanup(); reject(error); });
-    child.once('close', (status, signal) => {
+    child.once('close', async (status, exitSignal) => {
       cleanup();
-      if (failure) reject(failure); else resolve({ status, signal });
+      const stopped = stopping ? await stopping : true;
+      if (!stopped) reject(Object.assign(new Error(`${failure.message} Its processes could not be confirmed stopped.`), { unconfirmed: true }));
+      else if (failure) reject(failure); else resolve({ status, signal: exitSignal });
     });
     child.stdin.on('error', () => { /* A process failure is reported by error/close. */ });
     child.stdin.end(input);
@@ -94,10 +155,15 @@ async function reviewCommit(root, base, head, force) {
     if (error.code === 'EEXIST') throw new Error(`Review already running, or a stale review lock exists: ${lock}. See docs/PR_REVIEW.md.`);
     throw error;
   }
+  let keep = false;
   try {
     writeFileSync(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 });
     return await reviewLocked(root, base, head, force, cache);
-  } finally { rmSync(lock, { recursive: true, force: true }); }
+  } catch (error) {
+    // Reviewer processes may still be running, so another review of this commit must not start until someone checks.
+    if (error.unconfirmed) { keep = true; throw new Error(`${error.message} The review lock stays at ${lock}; stop any leftover reviewer processes, then remove it.`); }
+    throw error;
+  } finally { if (!keep) rmSync(lock, { recursive: true, force: true }); }
 }
 async function reviewLocked(root, base, head, force, cache) {
   const reportPath = join(cache, 'report.json');
@@ -130,7 +196,8 @@ async function reviewLocked(root, base, head, force, cache) {
         '-m', model, '-c', `model_reasoning_effort="${effort}"`, '--sandbox', 'read-only',
         '-C', snapshot, '--output-schema', schemaPath, '-o', output, '-'],
       { cwd: snapshot, env: childEnv, input: prompt, stdio: ['pipe', log, log] }, timeout * 1000);
-    } catch (error) { throw new Error(`Codex review failed: ${error.message} See ${logPath}`);
+    } catch (error) {
+      throw Object.assign(new Error(`Codex review failed: ${error.message} See ${logPath}`), { unconfirmed: error.unconfirmed === true });
     } finally { closeSync(log); }
     if (result.status !== 0) throw new Error(`Codex review failed (${result.status ?? result.signal}). See ${logPath}`);
     if (git(snapshot, ['status', '--porcelain', '--untracked-files=all'])) throw new Error('Reviewer changed the snapshot; refusing its result.');

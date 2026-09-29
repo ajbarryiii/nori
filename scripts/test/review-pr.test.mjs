@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,6 +47,12 @@ appendFileSync(process.env.FAKE_LOG, JSON.stringify({args, prompt,
 if (process.env.FAKE_MODE === 'error') process.exit(7);
 if (process.env.FAKE_MODE === 'tree') {
   const worker = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], {stdio:'ignore'});
+  writeFileSync(process.env.FAKE_LOG + '.child', String(worker.pid));
+  await new Promise(resolve => setTimeout(resolve, 10000));
+}
+if (process.env.FAKE_MODE === 'session') {
+  // Codex runs tool commands in their own sessions, beyond a process-group signal.
+  const worker = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], {stdio:'ignore', detached:true});
   writeFileSync(process.env.FAKE_LOG + '.child', String(worker.pid));
   await new Promise(resolve => setTimeout(resolve, 10000));
 }
@@ -139,6 +145,25 @@ test('timeout terminates children of the Codex launcher', async t => {
   t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+});
+test('timeout terminates descendants that started their own session', async t => {
+  const f = fixture(t);
+  const r = f.run([], { FAKE_MODE: 'session', NORI_REVIEW_TIMEOUT_SECONDS: '1' });
+  assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /timed out/i);
+  const pid = Number(readFileSync(join(f.root, '.git/codex-calls.jsonl.child'), 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  assert.deepEqual(readdirSync(join(f.root, '.git/nori-review')).filter(x => existsSync(join(f.root, '.git/nori-review', x, 'running'))), []);
+});
+test('a timeout whose processes cannot be confirmed stopped keeps the review lock', async t => {
+  const f = fixture(t);
+  const ps = join(f.root, '.git', 'test-bin', 'ps'); writeFileSync(ps, '#!/bin/sh\nexit 1\n'); chmodSync(ps, 0o755);
+  const r = f.run([], { FAKE_MODE: 'session', NORI_REVIEW_TIMEOUT_SECONDS: '1' });
+  const pid = Number(readFileSync(join(f.root, '.git/codex-calls.jsonl.child'), 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /could not be confirmed stopped/);
+  const locks = readdirSync(join(f.root, '.git/nori-review')).map(x => join(f.root, '.git/nori-review', x, 'running')).filter(existsSync);
+  assert.equal(locks.length, 1); assert.match(r.stderr, new RegExp(locks[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 test('passing cache is specific to commits and force refreshes it', t => {
   const f = fixture(t);

@@ -230,8 +230,7 @@ export class CodexRuntime implements Runtime {
   close(): Promise<void> {
     const connection = this.connection;
     if (!connection) return Promise.resolve();
-    connection.closing = true;
-    connection.rpc.close();
+    if (!connection.closing) { connection.closing = true; connection.rpc.close(); }
     return connection.done;
   }
 
@@ -279,7 +278,8 @@ export class CodexRuntime implements Runtime {
     connection = { rpc, ready, loaded: new Set(), closing: false, done };
     this.connection = connection;
     try { await ready; } catch (error) {
-      if (this.connection === connection) { this.connection = null; rpc.close(); }
+      // Stopped before failing, so a retry or shutdown waits for it and an unconfirmed stop still halts the runtime.
+      if (this.connection === connection) await this.close();
       throw error;
     }
     return connection;

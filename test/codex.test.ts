@@ -12,6 +12,7 @@ class FakeCodex implements RpcPort {
   notes: string[] = [];
   closed = 0;
   failTurnStart = false;
+  failInitialize = false;
   /** Holds the closed report, as a real connection does until the server's processes have exited. */
   holdClose = false;
   private threads = 0; private turns = 0;
@@ -19,6 +20,7 @@ class FakeCodex implements RpcPort {
   constructor(readonly handlers: RpcHandlers, private readonly layers: () => unknown = () => []) {}
   async request(method: string, params: Record<string, unknown>) {
     this.requests.push({ method, params });
+    if (method === "initialize" && this.failInitialize) throw new Error("Codex could not initialize.");
     if (method === "initialize") return { userAgent: "codex-test", codexHome: "/tmp/codex", platformFamily: "unix", platformOs: "macos" };
     if (method === "config/read") return { config: {}, origins: {}, layers: this.layers() };
     if (method === "thread/start") return { thread: { id: `th-${++this.threads}` } };
@@ -53,7 +55,8 @@ function setup(t: { after(fn: () => void): void }) {
   const dir = mkdtempSync(join(tmpdir(), "nori-codex-")); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const connections: FakeCodex[] = [];
   let layers: unknown = [layer({ type: "user", file: join(dir, "home", "config.toml"), profile: null })];
-  const runtime = new CodexRuntime({ connect: handlers => { const c = new FakeCodex(handlers, () => layers); connections.push(c); return c; },
+  let configure: (connection: FakeCodex) => void = () => {};
+  const runtime = new CodexRuntime({ connect: handlers => { const c = new FakeCodex(handlers, () => layers); configure(c); connections.push(c); return c; },
     model: "gpt-test", workspaceDir: dir, timezone: "America/Los_Angeles", clock: () => epoch });
   const seen = { started: [] as unknown[], approvals: [] as unknown[], tools: [] as unknown[], usage: [] as number[], activity: 0 };
   let approve = true;
@@ -65,7 +68,7 @@ function setup(t: { after(fn: () => void): void }) {
     activity: () => { seen.activity++; },
   };
   return { dir, runtime, connections, conn: () => connections.at(-1)!, events, seen, setApprove: (value: boolean) => { approve = value; },
-    setLayers: (value: unknown) => { layers = value; } };
+    setLayers: (value: unknown) => { layers = value; }, onConnect: (fn: (connection: FakeCodex) => void) => { configure = fn; } };
 }
 
 test("start opts into the experimental API once, sandboxes a private thread with only the given tools, and parses the outcome", async t => {
@@ -298,6 +301,20 @@ test("closing ends active turns, and resolves, only once Codex's processes have 
   assert.equal((await next).status, "completed");
   await runtime.close();
   assert.equal(runtime.halted, null);
+});
+
+test("a connection that fails to initialize is stopped before the start fails or the runtime counts as closed", async t => {
+  const { runtime, connections, events, onConnect } = setup(t);
+  onConnect(c => { c.failInitialize = true; c.holdClose = true; });
+  let failed = false; const start = runtime.start(task(1), [], events).catch(() => { failed = true; });
+  await flush();
+  let closed = false; const closing = runtime.close().then(() => { closed = true; });
+  await flush();
+  assert.deepEqual([failed, closed, connections.length, connections[0]!.closed], [false, false, 1, 1]);
+  connections[0]!.finishClose(false);
+  await start; await closing;
+  assert.deepEqual([failed, closed], [true, true]);
+  assert.match(runtime.halted ?? "", /could not be confirmed stopped/);
 });
 
 test("if Codex's processes cannot be confirmed stopped, the runtime halts and starts nothing more", async t => {
