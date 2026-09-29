@@ -866,3 +866,22 @@ test("continuing a paused job withdraws its unsent pause notice", async t => {
   engine.acceptPage("owner", page([message("continue #1", 2)]));
   assert.equal(store.outbox().find(x => x.text.startsWith("Job #1 was interrupted"))?.status, "cancelled");
 });
+
+test("a late interrupt failure for a finished turn does not stop the next job", async t => {
+  const { engine, store, runtime } = setup(t);
+  let closed = 0; runtime.close = () => { closed++; };
+  let fail!: (error: Error) => void;
+  runtime.cancel = taskId => { runtime.cancelled.push(taskId); return new Promise((_r, reject) => { fail = reject; }); };
+  engine.acceptPage("owner", page([message("research a laptop"), message("research a phone", 2)]));
+  await engine.routeTasks(null);
+  const first = held(runtime);
+  const { done } = await started(engine);
+  engine.acceptPage("owner", page([message("cancel #1", 3)]));
+  await flush();
+  first.finish({ status: "interrupted" }); await done;
+  held(runtime);
+  void (await started(engine));
+  fail(new Error("interrupt timed out")); await flush();
+  assert.equal(closed, 0);
+  assert.equal(store.tasks()[1]?.state, "running");
+});

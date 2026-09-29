@@ -254,7 +254,9 @@ export class Engine {
 
   /** Interrupts a turn. If the interrupt cannot be confirmed, closing the runtime stops the turn with its connection. */
   private cancelTurn(taskId: number): void {
-    void this.runtime?.cancel(taskId).catch(() => { this.runtime?.close(); });
+    // Only the turn that was targeted: by the time the failure arrives, another job's turn may be running.
+    const turn = this.active.get(taskId);
+    void this.runtime?.cancel(taskId).catch(() => { if (turn && this.active.get(taskId) === turn) this.runtime?.close(); });
   }
 
   private status(contact: Contact): string {
