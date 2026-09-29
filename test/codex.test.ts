@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CodexRuntime, codexEnvironment } from "../src/codex.js";
+import { CodexRuntime, codexEnvironment, codexHome } from "../src/codex.js";
 import type { RpcHandlers, RpcPort, RuntimeEvents, RuntimeTool, Task } from "../src/contracts.js";
 import { epoch } from "./helpers.js";
 
@@ -13,10 +13,12 @@ class FakeCodex implements RpcPort {
   closed = 0;
   failTurnStart = false;
   private threads = 0; private turns = 0;
-  constructor(readonly handlers: RpcHandlers) {}
+  /** `layers` is what `config/read` reports as Codex's configuration layers. */
+  constructor(readonly handlers: RpcHandlers, private readonly layers: () => unknown = () => []) {}
   async request(method: string, params: Record<string, unknown>) {
     this.requests.push({ method, params });
     if (method === "initialize") return { userAgent: "codex-test", codexHome: "/tmp/codex", platformFamily: "unix", platformOs: "macos" };
+    if (method === "config/read") return { config: {}, origins: {}, layers: this.layers() };
     if (method === "thread/start") return { thread: { id: `th-${++this.threads}` } };
     if (method === "thread/resume") return { thread: { id: params.threadId } };
     if (method === "turn/start" && this.failTurnStart) throw new Error("RPC request timed out.");
@@ -24,6 +26,7 @@ class FakeCodex implements RpcPort {
     if (method === "turn/interrupt") return {};
     throw new Error(`unexpected ${method}`);
   }
+  params(method: string) { return this.requests.find(r => r.method === method)!.params; }
   notify(method: string) { this.notes.push(method); }
   close() { this.closed++; this.handlers.closed?.(); }
   emit(method: string, params: Record<string, unknown>) { this.handlers.notification?.(method, params); }
@@ -41,11 +44,13 @@ const task = (id: number, threadId: string | null = null): Task => ({ id, contac
 const tools: RuntimeTool[] = [{ name: "reminders_note", description: "Save a note.",
   inputSchema: { type: "object", properties: { title: { type: "string" } }, required: ["title"], additionalProperties: false } }];
 const outcome = (value: unknown) => JSON.stringify(value);
+const layer = (name: Record<string, unknown>, disabledReason: string | null = null) => ({ name, config: {}, version: "1", disabledReason });
 
 function setup(t: { after(fn: () => void): void }) {
   const dir = mkdtempSync(join(tmpdir(), "nori-codex-")); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const connections: FakeCodex[] = [];
-  const runtime = new CodexRuntime({ connect: handlers => { const c = new FakeCodex(handlers); connections.push(c); return c; },
+  let layers: unknown = [layer({ type: "user", file: join(dir, "home", "config.toml"), profile: null })];
+  const runtime = new CodexRuntime({ connect: handlers => { const c = new FakeCodex(handlers, () => layers); connections.push(c); return c; },
     model: "gpt-test", workspaceDir: dir, timezone: "America/Los_Angeles", clock: () => epoch });
   const seen = { started: [] as unknown[], approvals: [] as unknown[], tools: [] as unknown[], usage: [] as number[], activity: 0 };
   let approve = true;
@@ -56,24 +61,25 @@ function setup(t: { after(fn: () => void): void }) {
     usage: tokens => { seen.usage.push(tokens); },
     activity: () => { seen.activity++; },
   };
-  return { dir, runtime, connections, conn: () => connections.at(-1)!, events, seen, setApprove: (value: boolean) => { approve = value; } };
+  return { dir, runtime, connections, conn: () => connections.at(-1)!, events, seen, setApprove: (value: boolean) => { approve = value; },
+    setLayers: (value: unknown) => { layers = value; } };
 }
 
 test("start opts into the experimental API once, sandboxes a private thread with only the given tools, and parses the outcome", async t => {
   const { dir, runtime, conn, events, seen } = setup(t);
   const done = runtime.start(task(1), tools, events);
   await flush();
-  assert.deepEqual(conn().requests.map(r => r.method), ["initialize", "thread/start", "turn/start"]);
+  assert.deepEqual(conn().requests.map(r => r.method), ["initialize", "config/read", "thread/start", "turn/start"]);
   assert.equal((conn().requests[0]!.params.capabilities as Record<string, unknown>).experimentalApi, true);
   assert.deepEqual(conn().notes, ["initialized"]);
-  const thread = conn().requests[1]!.params;
+  const thread = conn().params("thread/start");
   assert.equal(thread.cwd, join(dir, "task-1"));
   assert.equal(statSync(join(dir, "task-1")).mode & 0o777, 0o700);
   assert.deepEqual([thread.approvalPolicy, thread.sandbox, thread.model, thread.ephemeral], ["on-request", "workspace-write", "gpt-test", false]);
   assert.deepEqual(thread.dynamicTools, [{ type: "function", ...tools[0] }]);
   assert.match(String(thread.developerInstructions), /America\/Los_Angeles/);
   assert.match(String(thread.developerInstructions), /untrusted/);
-  const turn = conn().requests[2]!.params;
+  const turn = conn().params("turn/start");
   assert.deepEqual(turn.input, [{ type: "text", text_elements: [],
     text: "This request was sent at 2026-09-28T16:00:00.000Z (the person's timezone is America/Los_Angeles).\n\nrequest 1" }]);
   assert.deepEqual((turn.outputSchema as { required: string[] }).required, ["outcome", "message", "evidence"]);
@@ -112,9 +118,9 @@ test("resume loads an existing thread once per connection, and cancel interrupts
   const { runtime, conn, events } = setup(t);
   await runtime.cancel(9);
   const first = runtime.resume(task(9, "th-9"), "follow up", [], events); await flush();
-  assert.deepEqual(conn().requests.map(r => r.method), ["initialize", "thread/resume", "turn/start"]);
-  assert.equal(conn().requests[1]!.params.threadId, "th-9");
-  assert.deepEqual(conn().requests[2]!.params.input, [{ type: "text", text: "follow up", text_elements: [] }]);
+  assert.deepEqual(conn().requests.map(r => r.method), ["initialize", "config/read", "thread/resume", "turn/start"]);
+  assert.equal(conn().params("thread/resume").threadId, "th-9");
+  assert.deepEqual(conn().params("turn/start").input, [{ type: "text", text: "follow up", text_elements: [] }]);
   await runtime.cancel(9);
   assert.deepEqual(conn().requests.at(-1), { method: "turn/interrupt", params: { threadId: "th-9", turnId: "tu-1" } });
   conn().finish("th-9", "tu-1", "", "interrupted");
@@ -153,15 +159,65 @@ test("a lost connection rejects the active turn, and the next call reconnects", 
   await assert.rejects(done, /disconnected/);
   const next = runtime.resume(task(1, "th-1"), "continue", [], events); await flush();
   assert.equal(connections.length, 2);
-  assert.deepEqual(conn().requests.map(r => r.method), ["initialize", "thread/resume", "turn/start"]);
+  assert.deepEqual(conn().requests.map(r => r.method), ["initialize", "config/read", "thread/resume", "turn/start"]);
   conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
   await next;
 });
 
-test("the Codex child gets a minimal environment without Nori's secrets", () => {
+test("the Codex child gets a minimal environment without Nori's secrets, and Nori's own Codex home", () => {
+  const home = "/Users/receipts/Library/Application Support/Nori/codex";
   const env = codexEnvironment({ PATH: "/usr/bin", HOME: "/Users/receipts", USER: "receipts", LANG: "en_US.UTF-8", TMPDIR: "/tmp/x",
-    CODEX_HOME: "/Users/receipts/.codex", TYPESAFE_API_KEY: "secret", AWS_SECRET_ACCESS_KEY: "secret", NODE_OPTIONS: "--inspect" });
+    CODEX_HOME: "/Users/receipts/.codex", TYPESAFE_API_KEY: "secret", AWS_SECRET_ACCESS_KEY: "secret", NODE_OPTIONS: "--inspect" }, home);
   assert.deepEqual(Object.keys(env).sort(), ["CODEX_HOME", "HOME", "LANG", "PATH", "TMPDIR", "USER"]);
+  assert.equal(env.CODEX_HOME, home);
+  assert.equal(codexEnvironment({ PATH: "/usr/bin" }, home).CODEX_HOME, home);
+});
+
+test("Nori's Codex home is a private directory inside its data directory", t => {
+  const dir = mkdtempSync(join(tmpdir(), "nori-home-")); t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, "a")); mkdirSync(join(dir, "b")); mkdirSync(join(dir, "elsewhere"));
+  assert.equal(codexHome(join(dir, "a")), join(dir, "a", "codex"));
+  assert.equal(statSync(join(dir, "a", "codex")).mode & 0o777, 0o700);
+  symlinkSync(join(dir, "elsewhere"), join(dir, "b", "codex"));
+  assert.throws(() => codexHome(join(dir, "b")), /symlink/);
+});
+
+test("no turn starts while an active Codex configuration layer has execution rules", async t => {
+  const { dir, runtime, conn, events, setLayers } = setup(t);
+  const withRules = (folder: string) => {
+    mkdirSync(join(folder, "rules"), { recursive: true });
+    writeFileSync(join(folder, "rules", "default.rules"), 'prefix_rule(pattern=["curl"], decision="allow")\n');
+    return folder;
+  };
+  const home = withRules(join(dir, "home")); const project = withRules(join(dir, "project", ".codex"));
+  setLayers([layer({ type: "user", file: join(home, "config.toml"), profile: null })]);
+  const refused = await runtime.start(task(1), [], events);
+  assert.equal(refused.status, "failed");
+  assert.ok(refused.status === "failed" && refused.message.includes(join(home, "rules")), JSON.stringify(refused));
+  assert.deepEqual(conn().requests.map(r => r.method), ["initialize", "config/read"]);
+  assert.deepEqual(conn().params("config/read"), { includeLayers: true, cwd: join(dir, "task-1") });
+  assert.equal((await runtime.resume(task(2, "th-2"), "go on", [], events)).status, "failed");
+  assert.deepEqual(conn().requests.at(-1)?.params, { includeLayers: true, cwd: join(dir, "task-2") });
+  // Layers Codex reports as disabled, such as untrusted projects, load no rules. A layer Nori cannot inspect counts as having them.
+  const refusals: Array<[unknown, RegExp]> = [[[layer({ type: "project", dotCodexFolder: project })], /execution rules/],
+    [[layer({ type: "mdm", domain: "com.openai.codex", key: "config_toml_base64" })], /cannot check/],
+    [[{ disabledReason: null }], /cannot check/], [null, /cannot check/]];
+  for (const [n, [layers, why]] of refusals.entries()) {
+    setLayers(layers);
+    const result = await runtime.start(task(10 + n), [], events);
+    assert.ok(result.status === "failed" && why.test(result.message), JSON.stringify([layers, result]));
+  }
+  assert.ok(!conn().requests.some(r => r.method === "thread/start" || r.method === "thread/resume"));
+  setLayers([layer({ type: "project", dotCodexFolder: project }, "untrusted"), layer({ type: "system", file: join(dir, "etc", "config.toml") }),
+    layer({ type: "user", file: join(dir, "clean", "config.toml"), profile: null })]);
+  const done = runtime.start(task(3), [], events); await flush();
+  assert.deepEqual(conn().requests.map(r => r.method).slice(-3), ["config/read", "thread/start", "turn/start"]);
+  conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
+  assert.equal((await done).status, "completed");
+  // Rules that appear later stop the next turn, even on a thread this connection already loaded.
+  setLayers([layer({ type: "user", file: join(home, "config.toml"), profile: null })]);
+  assert.equal((await runtime.resume(task(3, "th-1"), "go on", [], events)).status, "failed");
+  assert.deepEqual(conn().requests.map(r => r.method).slice(-2), ["turn/start", "config/read"]);
 });
 
 test("a cancel that arrives before the turn exists stops it from starting", async t => {
@@ -175,8 +231,8 @@ test("a cancel that arrives before the turn exists stops it from starting", asyn
 test("every turn pins user review and a sandbox without extra writable roots or network", async t => {
   const { dir, runtime, conn, events } = setup(t);
   const done = runtime.start(task(1), [], events); await flush();
-  assert.equal(conn().requests[1]!.params.approvalsReviewer, "user");
-  const turn = conn().requests[2]!.params;
+  assert.equal(conn().params("thread/start").approvalsReviewer, "user");
+  const turn = conn().params("turn/start");
   assert.deepEqual([turn.approvalPolicy, turn.approvalsReviewer], ["on-request", "user"]);
   assert.deepEqual(turn.sandboxPolicy, { type: "workspaceWrite", writableRoots: [join(dir, "task-1")], networkAccess: false,
     excludeTmpdirEnvVar: false, excludeSlashTmp: false });

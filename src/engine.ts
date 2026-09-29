@@ -28,6 +28,8 @@ interface ActiveTurn {
   gate: Promise<void>;
   /** Input sent with this turn; removed from the task once the runtime accepts or finishes the turn. */
   sent: string | null;
+  /** Tool calls in progress by call id. A concurrent call with the same id shares the first call's approval and result. */
+  calls: Map<string, Promise<{ success: boolean; text: string }>>;
 }
 
 /**
@@ -110,8 +112,7 @@ export class Engine {
     const command = parseEngineCommand(message.text);
     if (command) { reply(this.command(contact, command, message.sentAt)); return; }
     // Grammars consume the entire message, so a compound request never reaches one.
-    // Boundary whitespace is not an instruction separator; only internal markers make a request compound.
-    if (!isCompound(message.text.trim())) {
+    if (!isCompound(message.text)) {
       const context = { contact, time: message.sentAt, timezone: this.config.timezone };
       for (const plugin of this.host.permitted(contact)) {
         const id = plugin.manifest.id;
@@ -451,7 +452,7 @@ export class Engine {
       if (claimed && fresh) this.store.addDaily("runtime-tasks", localDay(now, this.config.timezone), 1);
     });
     if (!claimed) return;
-    const turn: ActiveTurn = { taskId: task.id, since: now, approvals: new Map(), limit: null, gate: Promise.resolve(), sent };
+    const turn: ActiveTurn = { taskId: task.id, since: now, approvals: new Map(), limit: null, gate: Promise.resolve(), sent, calls: new Map() };
     this.active.set(task.id, turn);
     let outcome: TurnOutcome;
     try {
@@ -472,9 +473,13 @@ export class Engine {
         if (turnId !== null && turn.sent !== null) { this.store.consumeInput(task.id, turn.sent); turn.sent = null; }
       },
       approval: async ({ operation, detail }) => this.requestApproval(task.id, contact, turn, operation, detail),
-      tool: async call => {
-        try { return await this.callTool(task.id, contact, turn, call); }
-        catch { return { success: false, text: "The tool failed." }; }
+      tool: call => {
+        const id = typeof call.callId === "string" ? call.callId : "";
+        const pending = id ? turn.calls.get(id) : undefined;
+        if (pending) return pending;
+        const result = this.callTool(task.id, contact, turn, call).catch(() => ({ success: false, text: "The tool failed." }));
+        if (id) { turn.calls.set(id, result); void result.then(() => { turn.calls.delete(id); }); }
+        return result;
       },
       activity: () => {
         if (!live()) return;

@@ -44,6 +44,12 @@ test("explicit compound markers keep a second instruction from being truncated",
   assert.equal(isCompound("note buy bread and milk"), false);
 });
 
+test("boundary whitespace is not a compound marker; internal separators still are", () => {
+  for (const text of ["remind me to stretch in 1 minute\n", "\r\nnote buy milk", " \n note buy milk \r\n "])
+    assert.equal(isCompound(text), false, JSON.stringify(text));
+  assert.equal(isCompound("\nnote buy milk\nremind me to call in 5 minutes\n"), true);
+});
+
 test("overnight quiet hours respect local time", () => {
   assert.equal(inQuietHours(Date.parse("2026-09-29T05:00:00Z"), "America/Los_Angeles", { start: 22, end: 8 }), true);
   assert.equal(inQuietHours(epoch, "America/Los_Angeles", { start: 22, end: 8 }), false);

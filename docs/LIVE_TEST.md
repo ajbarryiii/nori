@@ -97,15 +97,18 @@ Expect no `uncertain` items in `outbox`. If any appear, check the Messages conve
 
 ## 5. Codex setup
 
-1. Sign in to Codex for this account. The CLI bundled with Codex.app works:
+1. Sign in to Codex for Nori. Nori runs Codex with its own Codex home inside its data directory, not this account's `~/.codex`, so it needs its own sign-in even if Codex.app is already signed in. The CLI bundled with Codex.app works:
 
    ```sh
    CODEX=/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex
+   NORI_CODEX_HOME="$HOME/Library/Application Support/Nori/codex"
    "$CODEX" --version
-   "$CODEX" login
+   mkdir -p -m 700 "$NORI_CODEX_HOME"
+   CODEX_HOME="$NORI_CODEX_HOME" "$CODEX" login
+   CODEX_HOME="$NORI_CODEX_HOME" "$CODEX" login status   # expect: Logged in …
    ```
 
-2. Keep this account's Codex configuration (`~/.codex/config.toml`) minimal. In particular, add **no MCP servers**: their tools would bypass Nori's checks.
+2. Add nothing else to Nori's Codex home: no configuration, no execution rules, and in particular **no MCP servers**, whose tools would bypass Nori's checks. If Codex execution rules exist there or in `/etc/codex/rules`, every job fails with `Job #N couldn't be finished: Codex has execution rules in …`.
 3. Probe the connection. This starts no model turn:
 
    ```sh

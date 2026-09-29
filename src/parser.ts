@@ -34,9 +34,12 @@ export function parseEngineCommand(input: string): EngineCommand | null {
   return null;
 }
 
-/** Conservative detection keeps a second instruction from being truncated into a simpler action. */
+/**
+ * Conservative detection keeps a second instruction from being truncated into a simpler action. Boundary whitespace is not
+ * an instruction separator; only internal markers make a request compound.
+ */
 export function isCompound(text: string): boolean {
-  return /\b(?:and also|and then|also research|also email|also send)\b|[\r\n;]/i.test(text);
+  return /\b(?:and also|and then|also research|also email|also send)\b|[\r\n;]/i.test(text.trim());
 }
 
 export function validId(text: string): boolean { return Number.isSafeInteger(Number(text)) && Number(text) > 0; }

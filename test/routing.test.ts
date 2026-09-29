@@ -78,6 +78,14 @@ test("an enabled route acts through interpret, validation, and handle", async t 
   assert.deepEqual(transport.targets, [owner.conversation, owner.conversation]);
 });
 
+test("boundary whitespace does not keep an enabled route from acting", async t => {
+  const { engine, store } = setup(t);
+  engine.acceptPage("owner", page([message("Can you remind me to call mom in 2 hours?\n"), message("\nCan you remind me to stretch in 1 hour?", 2)]));
+  await engine.routeTasks(always(decide({ kind: "action", pluginId: "reminders" }, 0.95)));
+  assert.deepEqual(store.tasks().map(x => x.state), ["completed", "completed"]);
+  assert.deepEqual(reminders(store).map(x => x.title), ["call mom", "stretch"]);
+});
+
 test("low confidence, multiple actions, compound text, and unpermitted routes never act", async t => {
   const texts = ["Can you remind me to call mom in 2 hours?", "Can you remind me to call mom in 2 hours; and email Sam?"];
   const cases: Array<[string, RoutingDecision, Config]> = [

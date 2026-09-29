@@ -4,7 +4,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { parseConfig, requireAssistantUser } from "./config.js";
-import { CodexProbe, CodexRuntime, codexConnection, codexEnvironment } from "./codex.js";
+import { CodexProbe, CodexRuntime, codexConnection, codexEnvironment, codexHome } from "./codex.js";
 import { demo } from "./demo.js";
 import { checkPlugins } from "./host.js";
 import { ImessageTransport } from "./imsg.js";
@@ -35,7 +35,7 @@ async function main(): Promise<void> {
   if (command === "enroll" && !values.contact) throw new Error("Provide --contact <id> naming one configured contact to enroll.");
   if (command === "probe-codex") {
     const rpc = new StdioRpc({ command: values.codex ?? config.runtime?.codexPath ?? "codex", args: ["app-server"], timeoutMs: 15_000,
-      env: codexEnvironment(process.env) });
+      env: codexEnvironment(process.env, codexHome(config.dataDir)) });
     try { const result = await new CodexProbe(rpc).inspect(); console.log(JSON.stringify(result, null, 2)); if (!result.connected) process.exitCode = 1; }
     finally { rpc.close(); } return;
   }
@@ -75,8 +75,8 @@ async function main(): Promise<void> {
     if (config.runtime) {
       try { accessSync(config.runtime.codexPath, constants.X_OK); } catch { throw new Error("runtime.codexPath must be an executable Codex CLI."); }
     }
-    const runtime = config.runtime ? new CodexRuntime({ connect: codexConnection(config.runtime.codexPath), model: config.runtime.model,
-      workspaceDir: config.runtime.workspaceDir, timezone: config.timezone }) : undefined;
+    const runtime = config.runtime ? new CodexRuntime({ connect: codexConnection(config.runtime.codexPath, codexHome(config.dataDir)),
+      model: config.runtime.model, workspaceDir: config.runtime.workspaceDir, timezone: config.timezone }) : undefined;
     const controller = new AbortController(); const stop = () => controller.abort();
     process.once("SIGINT", stop); process.once("SIGTERM", stop);
     console.log(`Nori is running in the assistant profile for ${store.enrollments().length} enrolled contact(s). Local reminders enabled; ${runtime ? "Codex runs the owner's other requests." : "Codex execution is not connected."}`);

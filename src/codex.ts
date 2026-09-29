@@ -1,5 +1,5 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import type { CodexWorker, RpcHandlers, RpcPort, Runtime, RuntimeEvents, RuntimeTool, Task, TurnOutcome } from "./contracts.js";
 import { object as record } from "./config.js";
 import { StdioRpc } from "./rpc.js";
@@ -19,15 +19,31 @@ export class CodexProbe implements CodexWorker {
   }
 }
 
-const KEPT_ENVIRONMENT = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "CODEX_HOME"];
-/** Codex gets only what it needs to run and find its own login. Nori's API keys and other secrets stay behind. */
-export function codexEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(KEPT_ENVIRONMENT.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]]));
+/** Creates a directory only this user can use, refusing a symlink. */
+function privateDirectory(path: string, label: string): string {
+  if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`Refusing a symlink ${label}.`);
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  chmodSync(path, 0o700);
+  return path;
 }
 
-/** Spawns `codex app-server` over stdio with a minimal environment. */
-export function codexConnection(codexPath: string): (handlers: RpcHandlers) => RpcPort {
-  return handlers => new StdioRpc({ command: codexPath, args: ["app-server"], timeoutMs: 120_000, env: codexEnvironment(process.env), handlers });
+/**
+ * Nori's own Codex home, used as CODEX_HOME. It holds Nori's Codex login and threads, so the account's Codex execution
+ * rules, trusted projects, and other settings never apply to jobs. Created if missing.
+ */
+export function codexHome(dataDir: string): string {
+  return privateDirectory(join(dataDir, "codex"), "Codex home");
+}
+
+const KEPT_ENVIRONMENT = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"];
+/** Codex gets only what it needs to run, and Nori's own Codex home. Nori's API keys and other secrets stay behind. */
+export function codexEnvironment(env: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
+  return { ...Object.fromEntries(KEPT_ENVIRONMENT.flatMap(key => env[key] === undefined ? [] : [[key, env[key]]])), CODEX_HOME: home };
+}
+
+/** Spawns `codex app-server` over stdio with a minimal environment and Nori's own Codex home. */
+export function codexConnection(codexPath: string, home: string): (handlers: RpcHandlers) => RpcPort {
+  return handlers => new StdioRpc({ command: codexPath, args: ["app-server"], timeoutMs: 120_000, env: codexEnvironment(process.env, home), handlers });
 }
 
 /** The final message's shape. Only `completed` with evidence completes a task. */
@@ -86,6 +102,12 @@ function describeGrants(extra: Record<string, unknown> | null): string[] | null 
 const SPECIAL_PATHS: Record<string, string> = { root: "the whole disk", minimal: "basic system files", project_roots: "the project folders",
   tmpdir: "the temporary directory", slash_tmp: "/tmp" };
 
+/** Whether a directory has any entries. One that exists but cannot be read counts as having them. */
+function hasEntries(path: string): boolean {
+  try { return readdirSync(path).length > 0; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+}
+
 const clip = (text: string, length = 1500) => text.length > length ? `${text.slice(0, length - 1)}…` : text;
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null;
 
@@ -109,9 +131,10 @@ interface Connection { rpc: RpcPort; ready: Promise<void>; loaded: Set<string> }
 
 /**
  * The Codex app-server runtime. Each task gets its own persisted thread in a private working directory, with the
- * workspace-write sandbox and on-request approvals routed to the contact. Plugin tools are passed as dynamic tools
- * when the thread starts, and Codex calls them back over the same connection. Nori's database, transport, and
- * credentials are never passed to it. Dynamic tools are assumed to persist with a resumed thread.
+ * workspace-write sandbox and on-request approvals routed to the contact. A turn runs only when no active Codex
+ * configuration layer has execution rules, which could run commands outside the sandbox without asking. Plugin
+ * tools are passed as dynamic tools when the thread starts, and Codex calls them back over the same connection. Nori's
+ * database, transport, and credentials are never passed to it. Dynamic tools are assumed to persist with a resumed thread.
  */
 export class CodexRuntime implements Runtime {
   readonly manifest = { id: "codex", computerUse: "unverified", ownerOnly: true } as const;
@@ -127,7 +150,9 @@ export class CodexRuntime implements Runtime {
     const run = this.begin(task.id);
     try {
       const connection = await this.connect();
+      const refusal = run.cancelled ? null : await this.rulesProblem(connection, this.workspace(task.id));
       if (run.cancelled) return { status: "interrupted" };
+      if (refusal) return { status: "failed", message: refusal };
       const response = record(await connection.rpc.request("thread/start", { ...this.settings(task.id), ephemeral: false, serviceName: "nori",
         dynamicTools: tools.map(tool => ({ type: "function", ...tool })) }));
       const threadId = text(record(response?.thread)?.id);
@@ -146,7 +171,9 @@ export class CodexRuntime implements Runtime {
     const run = this.begin(task.id);
     try {
       const connection = await this.connect();
+      const refusal = run.cancelled ? null : await this.rulesProblem(connection, this.workspace(task.id));
       if (run.cancelled) return { status: "interrupted" };
+      if (refusal) return { status: "failed", message: refusal };
       if (!connection.loaded.has(task.threadId)) {
         await connection.rpc.request("thread/resume", { threadId: task.threadId, ...this.settings(task.id), excludeTurns: true });
         connection.loaded.add(task.threadId);
@@ -155,6 +182,27 @@ export class CodexRuntime implements Runtime {
       if (run.cancelled) return { status: "interrupted" };
       return this.turn(connection, task.id, task.threadId, input, events);
     } finally { this.starting.delete(task.id); }
+  }
+
+  /**
+   * Codex loads execution rules from every active configuration layer for a thread's directory, and a matching `allow`
+   * rule runs a command outside the sandbox without asking, whatever the approval policy. Checked before every turn;
+   * returns why a turn there must not run, or null. Layers Codex reports as disabled, such as untrusted projects, load
+   * no rules. A layer whose rules folder cannot be found or read counts as having rules.
+   */
+  private async rulesProblem(connection: Connection, cwd: string): Promise<string | null> {
+    const layers = record(await connection.rpc.request("config/read", { includeLayers: true, cwd }))?.layers;
+    if (!Array.isArray(layers)) return "Nori cannot check Codex's execution rules, so it won't run jobs.";
+    for (const value of layers) {
+      const layer = record(value); const source = record(layer?.name);
+      if (typeof layer?.disabledReason === "string") continue;
+      const folder = source?.type === "project" ? source.dotCodexFolder : typeof source?.file === "string" ? dirname(source.file) : null;
+      if (typeof folder !== "string" || !isAbsolute(folder))
+        return `Nori cannot check the execution rules in Codex's ${text(source?.type) ?? "unknown"} configuration, so it won't run jobs.`;
+      const rules = join(folder, "rules");
+      if (hasEntries(rules)) return `Codex has execution rules in ${rules} that could run commands without asking you. Nori won't run jobs until they are removed.`;
+    }
+    return null;
   }
 
   /** Reports the thread as soon as it exists, before any turn, so a failed start can still be resumed rather than repeated. */
@@ -188,11 +236,7 @@ export class CodexRuntime implements Runtime {
   }
 
   private workspace(taskId: number): string {
-    const path = join(this.options.workspaceDir, `task-${taskId}`);
-    if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new Error("Refusing a symlink task workspace.");
-    mkdirSync(path, { recursive: true, mode: 0o700 });
-    chmodSync(path, 0o700);
-    return path;
+    return privateDirectory(join(this.options.workspaceDir, `task-${taskId}`), "task workspace");
   }
 
   private instructions(): string {

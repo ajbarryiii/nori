@@ -253,6 +253,36 @@ test("high-impact tools need the contact's approval on every call", async t => {
   assert.equal(sent, 1);
 });
 
+test("concurrent calls with the same call id share one approval and one result", async t => {
+  let sent = 0;
+  const mailer: ActionPlugin = {
+    manifest: { id: "mailer", version: "1.0.0", stateVersion: 1, capabilities: [], roles: ["owner"], criteria: "Send mail.", examples: [] },
+    schema: { send: { to: { type: "string", maxLength: 100 } } }, migrate: () => {}, match: () => null,
+    handle: (command, ctx) => { sent++; ctx.reply(`Sent to ${String(command.to)}.`); },
+    tools: [{ kind: "send", description: "Send an email.", impact: "high" }],
+  };
+  const cfg = { ...withRuntime, contacts: [{ ...owner, plugins: ["reminders", "mailer"] }] };
+  const { engine, store, runtime } = setup(t, cfg, [remindersPlugin, mailer]);
+  engine.acceptPage("owner", page([message("email Sam the notes")]));
+  await engine.routeTasks(null);
+  let results: Array<{ success: boolean; text: string }> = [];
+  runtime.turns.push(async events => {
+    const call = { callId: "a", name: "mailer_send", arguments: { to: "sam@example.com" } };
+    results = await Promise.all([events.tool(call), events.tool({ ...call })]);
+    return { status: "completed", message: "Sent.", evidence: ["Tool confirmed"] };
+  });
+  const { done } = await started(engine);
+  assert.deepEqual(store.approvals().map(x => [x.id, x.status]), [[1, "pending"]]);
+  engine.acceptPage("owner", page([message("approve A1", 2)]));
+  await flush(); await flush();
+  assert.deepEqual(store.approvals().map(x => [x.id, x.status]), [[1, "approved"]]);
+  await done;
+  assert.equal(sent, 1);
+  assert.deepEqual(results, [{ success: true, text: "Sent to sam@example.com." }, { success: true, text: "Sent to sam@example.com." }]);
+  const task = store.tasks()[0]!;
+  assert.deepEqual([store.toolCalls(task.id).length, task.usage.toolCalls, task.state], [1, 1, "completed"]);
+});
+
 test("reaching a budget pauses the task with a next-decision message, and continue grants more", async t => {
   const { engine, store, runtime, texts } = setup(t);
   engine.acceptPage("owner", page([message("organize everything")]));

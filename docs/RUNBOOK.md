@@ -114,7 +114,15 @@ After reviewing recorded decisions against labeled examples such as `test/fixtur
 
 The runtime is off until `runtime` is set in the configuration. It is owner-only: members' other requests stay queued.
 
-1. In `receipts`, install the Codex CLI to use and sign it in with `codex login`. The CLI bundled with Codex.app lives at `/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex`. Nori was built against `codex-cli 0.158.0-alpha.2.1` and uses experimental app-server features (dynamic tools and structured final messages), so re-run the tests below after upgrading Codex.
+1. In `receipts`, install the Codex CLI to use. The CLI bundled with Codex.app lives at `/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex`. Nori was built against `codex-cli 0.158.0-alpha.2.1` and uses experimental app-server features (dynamic tools and structured final messages), so re-run the tests below after upgrading Codex. Nori runs Codex with its own Codex home, `codex` inside the data directory, never the account's `~/.codex`. Sign in there once:
+
+   ```sh
+   NORI_CODEX_HOME="$HOME/Library/Application Support/Nori/codex"
+   mkdir -p -m 700 "$NORI_CODEX_HOME"
+   CODEX_HOME="$NORI_CODEX_HOME" /absolute/path/to/codex login
+   CODEX_HOME="$NORI_CODEX_HOME" /absolute/path/to/codex login status
+   ```
+
 2. Check the connection without starting a model turn:
 
    ```sh
@@ -148,7 +156,8 @@ How a job behaves over iMessage:
 Boundaries and known limits:
 
 - Codex gets a minimal environment (no `TYPESAFE_API_KEY` or other Nori secrets) and is never passed Nori's database, transport, or credentials. Its plugin tools act only for the job's contact, and each call is re-checked and recorded.
-- Every turn pins approvals to you (not an automatic reviewer) and a sandbox with no extra writable roots or network, overriding the Codex configuration. Other settings in the `receipts` account's Codex configuration still apply, notably MCP servers, whose tools would bypass Nori's broker. Keep that configuration minimal and add no MCP servers.
+- Every turn pins approvals to you (not an automatic reviewer) and a sandbox with no extra writable roots or network, overriding the Codex configuration. Because Nori uses its own Codex home, the `receipts` account's Codex configuration, execution rules, trusted projects, and MCP servers do not apply to jobs. Keep Nori's Codex home to the login alone: add no configuration, rules, or MCP servers there, since MCP tools would bypass Nori's broker.
+- Codex execution rules (`rules/*.rules`) can run a matching command outside the sandbox without asking you. Before every turn Nori asks Codex which configuration layers apply to the job's directory. If any has execution rules, including machine-wide ones in `/etc/codex/rules`, or cannot be checked, the job fails with a message naming the problem and nothing runs. Remove the rules, then send the request again. A configuration layer Nori cannot inspect, such as one managed by MDM, also stops jobs. Other machine-wide Codex configuration in `/etc/codex` still applies.
 - The Codex sandbox limits writes and network access, not reads. Commands can read files the `receipts` account can read, including Nori's state database, and inherit the service's macOS privacy permissions such as Full Disk Access. Keep personal data out of that account, and treat Codex jobs as able to see Nori's stored messages. Stronger isolation, such as running Codex under a separate account, is future work.
 - Web pages and files are untrusted input. Approvals show the exact command, and high-impact tools always ask, but a prompt-injected job can still read data and write inside its sandbox.
 - Plugin tools are passed when a thread starts and are assumed to persist when Nori resumes that thread after a restart. Verify this with a real job before relying on it.
