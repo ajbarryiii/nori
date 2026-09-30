@@ -8,4 +8,4 @@ Do not commit plan markdown documents.
 
 # PR Review
 
-Use the repository's `babysit-pr` skill when babysitting a pull request. Independent review runs through `npm run review` with GPT-6 Astra at xHigh; the original implementation agent verifies findings and makes fixes. The local pre-push hook enforces review for committed changes. Do not bypass it or substitute another model without the user's instruction. See `docs/PR_REVIEW.md` for setup and report locations.
+Use the personal `babysit-pr` skill when babysitting a pull request. In this repository, independent review runs through `npm run review` with GPT-6 Astra at xHigh; the original implementation agent verifies findings and makes fixes. The local pre-push hook enforces review for committed changes. Do not bypass it or substitute another model without the user's instruction. See `docs/PR_REVIEW.md` for setup and report locations.

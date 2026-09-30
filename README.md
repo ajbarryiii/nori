@@ -35,7 +35,7 @@ See [the setup and permissions runbook](docs/RUNBOOK.md) and [runtime contracts]
 
 Source layout: `src/engine.ts` (dispatch, timers, delivery, routing, runtime jobs), `src/host.ts` (plugin registry, permissions, contexts, tools, Jev catalog), `src/plugins/` (in-process plugins), `src/codex.ts` (Codex app-server runtime), `src/store.ts` (SQLite state), and `src/contracts.ts` (interfaces).
 
-For development, [install the local Astra xHigh pre-push review](docs/PR_REVIEW.md). The `babysit-pr` skill works in Codex and Claude Code; the original implementation agent fixes the independent reviewer's findings.
+For development, [install the local Astra xHigh pre-push review](docs/PR_REVIEW.md). The personal `babysit-pr` skill works across repositories in Codex and Claude Code; the original implementation agent fixes the independent reviewer's findings.
 
 ```sh
 npm test
