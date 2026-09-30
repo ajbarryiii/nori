@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { RpcHandlers, RpcPort } from "./contracts.js";
@@ -7,22 +8,38 @@ import { object as record } from "./config.js";
 const run = promisify(execFile);
 const signal = (pid: number, name: NodeJS.Signals) => { try { process.kill(pid, name); } catch { /* Already gone. */ } };
 
-/** Every process's parent and start time. The start time keeps a reused process id from being mistaken for another. */
-export type ProcessTable = Map<number, { parent: number; start: string; exited: boolean }>;
+/** Set in the server's environment, and inherited by what it starts, so processes reparented away from it can be found. */
+export const PROCESS_TAG = "NORI_PROCESS_TAG";
 
-async function processTable(): Promise<ProcessTable> {
-  const { stdout } = await run("/bin/ps", ["-A", "-o", "pid=,ppid=,stat=,lstart="], { maxBuffer: 16 * 1_048_576 });
+/**
+ * Every process's parent, process group, and start time, and whether its environment carries `tag`. The start time keeps
+ * a reused process id from being mistaken for another. macOS hides the environment of its own system binaries.
+ */
+export type ProcessTable = Map<number, { parent: number; group: number; start: string; exited: boolean; tagged: boolean }>;
+
+async function processTable(tag: string): Promise<ProcessTable> {
+  const [{ stdout }, { stdout: environments }] = await Promise.all([
+    run("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="], { maxBuffer: 16 * 1_048_576 }),
+    run("/bin/ps", ["-A", "-E", "-ww", "-o", "pid=,command="], { maxBuffer: 256 * 1_048_576 })]);
+  const marker = `${PROCESS_TAG}=${tag}`; const tagged = new Set<number>();
+  for (const line of environments.split("\n")) {
+    const pid = /^\s*(\d+)\s/.exec(line)?.[1];
+    if (pid && line.includes(marker)) tagged.add(Number(pid));
+  }
   const table: ProcessTable = new Map();
   for (const line of stdout.split("\n")) {
-    const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
-    if (row) table.set(Number(row[1]), { parent: Number(row[2]), exited: row[3]!.startsWith("Z"), start: row[4]! });
+    const row = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
+    if (row) table.set(Number(row[1]), { parent: Number(row[2]), group: Number(row[3]), exited: row[4]!.startsWith("Z"), start: row[5]!,
+      tagged: tagged.has(Number(row[1])) });
   }
   return table;
 }
 
 /**
  * Pauses a process and all its descendants, including those in other sessions, so none can start another process or be
- * orphaned out of reach, then kills them all and waits until none is running. `uncollected` reports whether `root` is
+ * orphaned out of reach, then kills them all and waits until none is running. Processes already reparented away, because
+ * what started them exited, are found by the tag in their environment, or by sharing a process group, other than this
+ * process's own, with a process already found. `uncollected` reports whether `root` is
  * still a child this process has not collected, so its id cannot belong to anything else. Returns whether every process
  * found was confirmed stopped; if the processes cannot be listed, those already found are killed and it returns false.
  */
@@ -41,12 +58,19 @@ async function freezeAndKill(root: number, uncollected: () => boolean, list: () 
     const start = table.get(root)?.start;
     if (!uncollected()) found.delete(root);
     else if (start !== undefined && !found.has(root)) found.set(root, start);
+    const own = table.get(process.pid)?.group;
+    // Groups of processes found in this listing, so a group id reused after its members exited is never matched.
+    const groups = new Set<number>();
+    for (const [pid, start] of found) { const entry = table.get(pid); if (entry?.start === start && entry.group !== own) groups.add(entry.group); }
     let added = false; let grew = true;
     while (grew) {
       grew = false;
       for (const [pid, entry] of table) {
-        if (found.has(pid) || !found.has(entry.parent) || table.get(entry.parent)?.start !== found.get(entry.parent)) continue;
+        if (found.has(pid) || pid === process.pid) continue;
+        const child = found.has(entry.parent) && table.get(entry.parent)?.start === found.get(entry.parent);
+        if (!child && !entry.tagged && !groups.has(entry.group)) continue;
         signal(pid, "SIGSTOP"); found.set(pid, entry.start); added = grew = true;
+        if (entry.group !== own) groups.add(entry.group);
       }
     }
     if (!added) break;
@@ -78,10 +102,12 @@ export class StdioRpc implements RpcPort {
   private buffer = "";
   private closed = false;
   private readonly exited: Promise<void>;
+  private readonly tag = randomBytes(16).toString("hex");
   /** `processTable` lists processes when stopping the server's process tree; it is replaceable for tests. */
   constructor(private readonly options: { command: string; args: string[]; timeoutMs: number; jsonrpc?: boolean;
-    env?: NodeJS.ProcessEnv; handlers?: RpcHandlers; processTable?: () => Promise<ProcessTable> }) {
-    this.child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "pipe"], shell: false, ...(options.env ? { env: options.env } : {}) });
+    env?: NodeJS.ProcessEnv; handlers?: RpcHandlers; processTable?: (tag: string) => Promise<ProcessTable> }) {
+    this.child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "pipe"], shell: false,
+      env: { ...(options.env ?? process.env), [PROCESS_TAG]: this.tag } });
     this.exited = new Promise(resolve => { this.child.once("exit", () => resolve()); this.child.once("error", () => resolve()); });
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.receive(chunk));
@@ -160,7 +186,8 @@ export class StdioRpc implements RpcPort {
     const report = (stopped: boolean) => { try { this.options.handlers?.closed?.(stopped); } catch { /* Closing never throws. */ } };
     const pid = this.child.pid; const uncollected = () => this.child.exitCode === null && this.child.signalCode === null;
     if (pid === undefined || !uncollected()) { report(true); return; }
-    void killTree(pid, uncollected, this.options.processTable ?? processTable).then(async stopped => {
+    const list = this.options.processTable ?? processTable;
+    void killTree(pid, uncollected, () => list(this.tag)).then(async stopped => {
       this.child.kill("SIGKILL");
       return await Promise.race([this.exited.then(() => true), delay(5_000, false, { ref: false })]) && stopped;
     }).then(report);

@@ -59,45 +59,71 @@ function show(report, path, cached = false) {
   console.log(`Report: ${path}`);
 }
 const signal = (pid, name) => { try { process.kill(pid, name); } catch { /* Already gone. */ } };
-/** Every process's parent and start time. The start time keeps a reused process id from being mistaken for another. */
-function processTable() {
-  return new Promise((resolve, reject) => execFile('ps', ['-A', '-o', 'pid=,ppid=,stat=,lstart='], { env: childEnv, maxBuffer: 16 * 1024 * 1024 },
-    (error, stdout) => {
-      if (error) { reject(error); return; }
-      const table = new Map();
-      for (const line of stdout.split('\n')) {
-        const row = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
-        if (row) table.set(Number(row[1]), { parent: Number(row[2]), exited: row[3].startsWith('Z'), start: row[4] });
-      }
-      resolve(table);
-    }));
+/** Set in the reviewer's environment, and inherited by what it starts, so processes reparented away from it can be found. */
+const PROCESS_TAG = 'NORI_PROCESS_TAG';
+const ps = args => new Promise((resolve, reject) => execFile('ps', args, { env: childEnv, maxBuffer: 256 * 1024 * 1024 },
+  (error, stdout) => { if (error) reject(error); else resolve(stdout); }));
+/** Processes whose environment carries the tag. macOS hides the environment of its own system binaries. */
+async function tagged(tag, pids) {
+  const marker = `${PROCESS_TAG}=${tag}`; const found = new Set();
+  if (process.platform === 'linux') {
+    for (const pid of pids) { try { if (readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').includes(marker)) found.add(pid); } catch { /* Gone or not ours. */ } }
+    return found;
+  }
+  for (const line of (await ps(['-A', '-E', '-ww', '-o', 'pid=,command='])).split('\n')) {
+    const pid = /^\s*(\d+)\s/.exec(line)?.[1];
+    if (pid && line.includes(marker)) found.add(Number(pid));
+  }
+  return found;
+}
+/**
+ * Every process's parent, process group, and start time, and whether it carries the tag. The start time keeps a reused
+ * process id from being mistaken for another.
+ */
+async function processTable(tag) {
+  const table = new Map();
+  for (const line of (await ps(['-A', '-o', 'pid=,ppid=,pgid=,stat=,lstart='])).split('\n')) {
+    const row = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
+    if (row) table.set(Number(row[1]), { parent: Number(row[2]), group: Number(row[3]), exited: row[4].startsWith('Z'), start: row[5], tagged: false });
+  }
+  for (const pid of await tagged(tag, [...table.keys()])) table.get(pid).tagged = true;
+  return table;
 }
 /**
  * Pauses the reviewer and all its descendants, including tool commands in their own sessions that a process-group signal
- * misses, then kills them all and waits until none is running. `uncollected` reports whether `root` is still a child this
- * process has not collected, so its id cannot belong to anything else. Returns whether every process was confirmed stopped.
+ * misses, then kills them all and waits until none is running. Processes already reparented away, because what started
+ * them exited, are found by the tag in their environment, or by sharing a process group, other than this process's own,
+ * with a process already found. `uncollected` reports whether `root` is still a child this process has not collected, so
+ * its id cannot belong to anything else. Returns whether every process was confirmed stopped.
  */
-async function stopTree(root, uncollected) {
+async function stopTree(root, uncollected, tag) {
   if (!uncollected()) return true;
   signal(root, 'SIGSTOP');
   const found = new Map();
   try {
     for (let round = 0; round < 50; round++) {
-      const table = await processTable();
+      const table = await processTable(tag);
       const start = table.get(root)?.start;
       if (!uncollected()) found.delete(root); else if (start !== undefined && !found.has(root)) found.set(root, start);
+      const own = table.get(process.pid)?.group;
+      // Groups of processes found in this listing, so a group id reused after its members exited is never matched.
+      const groups = new Set();
+      for (const [pid, start] of found) { const entry = table.get(pid); if (entry?.start === start && entry.group !== own) groups.add(entry.group); }
       let added = false; let grew = true;
       while (grew) {
         grew = false;
         for (const [pid, entry] of table) {
-          if (found.has(pid) || !found.has(entry.parent) || table.get(entry.parent)?.start !== found.get(entry.parent)) continue;
+          if (found.has(pid) || pid === process.pid) continue;
+          const child = found.has(entry.parent) && table.get(entry.parent)?.start === found.get(entry.parent);
+          if (!child && !entry.tagged && !groups.has(entry.group)) continue;
           signal(pid, 'SIGSTOP'); found.set(pid, entry.start); added = grew = true;
+          if (entry.group !== own) groups.add(entry.group);
         }
       }
       if (!added) break;
     }
     for (let round = 0; round < 40 && found.size; round++) {
-      const table = await processTable();
+      const table = await processTable(tag);
       for (const [pid, start] of found) {
         const entry = table.get(pid);
         if (!entry || entry.start !== start || entry.exited || (pid === root && !uncollected())) found.delete(pid);
@@ -115,12 +141,13 @@ async function stopTree(root, uncollected) {
 function runCodex(command, args, options, timeout) {
   return new Promise((resolve, reject) => {
     const { input, ...spawnOptions } = options;
-    const child = spawn(command, args, { ...spawnOptions, detached: true });
+    const tag = randomUUID();
+    const child = spawn(command, args, { ...spawnOptions, env: { ...(spawnOptions.env ?? process.env), [PROCESS_TAG]: tag }, detached: true });
     let failure; let stopping = null;
     const terminate = () => {
       if (!child.pid || stopping) return;
       const uncollected = () => child.exitCode === null && child.signalCode === null;
-      stopping = stopTree(child.pid, uncollected).then(stopped => {
+      stopping = stopTree(child.pid, uncollected, tag).then(stopped => {
         // The process group is the fallback when the process list is unavailable.
         if (!stopped && uncollected()) signal(-child.pid, 'SIGKILL');
         return stopped;

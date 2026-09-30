@@ -116,6 +116,20 @@ test("closing stops the server and every process it started, even in another ses
   assert.deepEqual(pids.map(running), [false, false, false, false]);
 });
 
+test("closing also stops processes left behind by commands that have exited", async t => {
+  let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
+  const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,
+    handlers: { closed: stopped => reported(stopped) } });
+  const pids = await rpc.request("orphans", {}) as number[];
+  t.after(() => { for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ } } });
+  // Their launchers have exited, so none of them is a descendant of the server any more.
+  const parents = pids.map(pid => Number(execFileSync("/bin/ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" }).trim()));
+  assert.deepEqual(parents, [1, 1, 1]);
+  rpc.close();
+  assert.equal(await closed, true);
+  assert.deepEqual(pids.map(running), [false, false, false]);
+});
+
 test("a stop that cannot be confirmed is reported as unconfirmed", async t => {
   let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
   const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,

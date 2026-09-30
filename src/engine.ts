@@ -555,18 +555,22 @@ export class Engine {
   private ask(taskId: number, contact: Contact, turn: ActiveTurn, operation: string, detail: string): Promise<boolean> {
     const limits = this.config.runtime!; const now = this.clock();
     let approvalId: number | null = null; let overBudget = false;
-    this.commit(() => {
-      const task = this.store.task(taskId);
-      if (!task || !this.open(taskId, turn)) return;
-      this.stopClock(turn);
-      // Time already used counts even though the clock pauses for approvals; past the budget, nothing is asked.
-      if (this.store.task(taskId)!.usage.runMs > limits.budget.minutes * 60_000 * task.usage.allowance) { overBudget = true; return; }
-      approvalId = this.store.addApproval({ taskId, contactId: contact.id, operation, detail, createdAt: now,
-        expiresAt: now + limits.approvalMinutes * 60_000 });
-      this.store.updateTask(taskId, { state: "waiting_contact", waitingFor: { kind: "approval" } });
-      this.tell(contact, `approval:${approvalId}`, `Job #${task.number} needs your OK to ${operation}: ${detail}\n`
-        + `Reply ‘approve A${approvalId}’ or ‘deny A${approvalId}’ within ${limits.approvalMinutes} minutes.`);
-    });
+    // Pausing the clock is part of the transaction: if it rolls back, the clock keeps running from where it was.
+    const since = turn.since;
+    try {
+      this.commit(() => {
+        const task = this.store.task(taskId);
+        if (!task || !this.open(taskId, turn)) return;
+        this.stopClock(turn);
+        // Time already used counts even though the clock pauses for approvals; past the budget, nothing is asked.
+        if (this.store.task(taskId)!.usage.runMs > limits.budget.minutes * 60_000 * task.usage.allowance) { overBudget = true; return; }
+        approvalId = this.store.addApproval({ taskId, contactId: contact.id, operation, detail, createdAt: now,
+          expiresAt: now + limits.approvalMinutes * 60_000 });
+        this.store.updateTask(taskId, { state: "waiting_contact", waitingFor: { kind: "approval" } });
+        this.tell(contact, `approval:${approvalId}`, `Job #${task.number} needs your OK to ${operation}: ${detail}\n`
+          + `Reply ‘approve A${approvalId}’ or ‘deny A${approvalId}’ within ${limits.approvalMinutes} minutes.`);
+      });
+    } catch (error) { turn.since = since; throw error; }
     if (overBudget) { if (turn.since === null) turn.since = this.clock(); this.interrupt(turn, { kind: "limit", limit: "minutes" }); }
     const id = approvalId;
     if (id === null) return Promise.resolve(false);

@@ -366,6 +366,24 @@ test("approval waits do not count against the time budget", async t => {
   assert.equal(store.tasks()[0]?.state, "completed");
 });
 
+test("an approval request that cannot be recorded leaves the job's running time counting", async t => {
+  const { engine, store, runtime, advance } = setup(t);
+  engine.acceptPage("owner", page([message("check the weather service")]));
+  await engine.routeTasks(null);
+  const add = store.addApproval.bind(store); let failures = 1;
+  store.addApproval = (...args) => { if (failures-- > 0) throw new Error("disk full"); return add(...args); };
+  let request: Promise<boolean> | undefined;
+  const turn = held(runtime);
+  const { done: run } = await started(engine);
+  request = turn.events().approval({ operation: "run a command", detail: "curl https://example.com" });
+  await assert.rejects(request, /disk full/);
+  advance(31 * 60_000); await engine.tick();
+  await run;
+  assert.deepEqual(runtime.cancelled, [store.tasks()[0]!.id]);
+  assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "minutes" });
+  assert.ok(store.tasks()[0]!.usage.runMs >= 31 * 60_000);
+});
+
 test("runtime turns run one at a time, and daily limits hold new tasks until the next local day", async t => {
   const { engine, store, runtime, advance } = setup(t, { ...withRuntime, runtime: { ...runtimeConfig, daily: { tasks: 1, tokens: 5000 } } });
   engine.acceptPage("owner", page([message("research a laptop"), message("research a phone", 2)]));

@@ -56,6 +56,14 @@ if (process.env.FAKE_MODE === 'session') {
   writeFileSync(process.env.FAKE_LOG + '.child', String(worker.pid));
   await new Promise(resolve => setTimeout(resolve, 10000));
 }
+if (process.env.FAKE_MODE === 'orphan') {
+  // A command that exits after starting a detached worker, which is then reparented away from the reviewer.
+  const launcher = spawn(process.execPath, ['-e', "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' }); console.log(c.pid); c.unref();"], {stdio:['ignore','pipe','ignore']});
+  let text = ''; launcher.stdout.on('data', d => { text += d; });
+  await new Promise(resolve => launcher.once('exit', resolve));
+  writeFileSync(process.env.FAKE_LOG + '.child', text.trim());
+  await new Promise(resolve => setTimeout(resolve, 10000));
+}
 if (process.env.FAKE_MODE === 'hang') await new Promise(resolve => setTimeout(resolve, 10000));
 if (process.env.FAKE_MODE === 'mutate') writeFileSync(join(cwd, 'code.js'), 'modified by reviewer');
 writeFileSync(args[args.indexOf('-o') + 1], process.env.FAKE_MODE === 'malformed' ? 'not JSON' : process.env.FAKE_REVIEW);
@@ -154,6 +162,14 @@ test('timeout terminates descendants that started their own session', async t =>
   t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
   assert.deepEqual(readdirSync(join(f.root, '.git/nori-review')).filter(x => existsSync(join(f.root, '.git/nori-review', x, 'running'))), []);
+});
+test('timeout terminates processes left behind by commands that have exited', async t => {
+  const f = fixture(t);
+  const r = f.run([], { FAKE_MODE: 'orphan', NORI_REVIEW_TIMEOUT_SECONDS: '2' });
+  assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /timed out/i);
+  const pid = Number(readFileSync(join(f.root, '.git/codex-calls.jsonl.child'), 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 });
 test('a timeout whose processes cannot be confirmed stopped keeps the review lock', async t => {
   const f = fixture(t);
