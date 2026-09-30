@@ -311,6 +311,8 @@ export interface RuntimeEvents {
   started(ids: { threadId: string; turnId: string | null }): void;
   /** The runtime began one of its own tool actions (a command, file change, or web search). Counts against the tool-call budget. */
   activity(): void;
+  /** One of the runtime's own tool actions finished. Once the budget is used, the turn stops here, before another begins. */
+  activityEnded(): void;
   /** Holds the turn until the contact decides. Resolves false on deny, expiry, or cancellation. */
   approval(request: { operation: string; detail: string }): Promise<boolean>;
   /** Runs an exported plugin tool for the task's contact. Never throws. */

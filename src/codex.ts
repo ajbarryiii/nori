@@ -334,6 +334,9 @@ export class CodexRuntime implements Runtime {
     if (method === "item/started" && typeof item?.type === "string" && NATIVE_TOOLS.has(item.type)) {
       try { turn.events.activity(); } catch { /* Budgets are enforced by the engine. */ }
     }
+    if (method === "item/completed" && typeof item?.type === "string" && NATIVE_TOOLS.has(item.type)) {
+      try { turn.events.activityEnded(); } catch { /* Budgets are enforced by the engine. */ }
+    }
     if ((method === "item/started" || method === "item/completed") && item?.type === "commandExecution" && typeof item.id === "string")
       turn.commands.set(item.id, { command: text(item.command), cwd: text(item.cwd) });
     if (method === "turn/started") { const turnId = text(record(params.turn)?.id); if (turnId) this.announce(turn, turnId); }

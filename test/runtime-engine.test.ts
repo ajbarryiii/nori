@@ -636,6 +636,21 @@ test("the runtime's own tool actions count against the tool-call budget", async 
   assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "toolCalls" });
 });
 
+test("once the runtime's own actions reach the budget, the turn stops as the last one finishes", async t => {
+  const { engine, store, runtime } = setup(t);
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  const turn = held(runtime);
+  const { done: run } = await started(engine);
+  turn.events().activity(); turn.events().activityEnded(); turn.events().activity();
+  assert.deepEqual(runtime.cancelled, []);
+  turn.events().activityEnded();
+  await run;
+  assert.equal(store.tasks()[0]?.usage.toolCalls, 2);
+  assert.deepEqual(runtime.cancelled, [store.tasks()[0]!.id]);
+  assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "toolCalls" });
+});
+
 test("budgets and approval expiry are enforced while a send is still in flight", async t => {
   const { engine, store, runtime, transport, advance } = setup(t);
   transport.send = () => new Promise(() => {});

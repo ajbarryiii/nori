@@ -58,7 +58,7 @@ function setup(t: { after(fn: () => void): void }) {
   let configure: (connection: FakeCodex) => void = () => {};
   const runtime = new CodexRuntime({ connect: handlers => { const c = new FakeCodex(handlers, () => layers); configure(c); connections.push(c); return c; },
     model: "gpt-test", workspaceDir: dir, timezone: "America/Los_Angeles", clock: () => epoch });
-  const seen = { started: [] as unknown[], approvals: [] as unknown[], tools: [] as unknown[], usage: [] as number[], activity: 0 };
+  const seen = { started: [] as unknown[], approvals: [] as unknown[], tools: [] as unknown[], usage: [] as number[], activity: 0, ended: 0 };
   let approve = true;
   const events: RuntimeEvents = {
     started: ids => { seen.started.push(ids); },
@@ -66,6 +66,7 @@ function setup(t: { after(fn: () => void): void }) {
     tool: async call => { seen.tools.push(call); return { success: true, text: "Saved." }; },
     usage: tokens => { seen.usage.push(tokens); },
     activity: () => { seen.activity++; },
+    activityEnded: () => { seen.ended++; },
   };
   return { dir, runtime, connections, conn: () => connections.at(-1)!, events, seen, setApprove: (value: boolean) => { approve = value; },
     setLayers: (value: unknown) => { layers = value; }, onConnect: (fn: (connection: FakeCodex) => void) => { configure = fn; } };
@@ -337,6 +338,9 @@ test("Codex's own tool actions are reported as activity; plugin tool calls are n
   for (const type of ["commandExecution", "fileChange", "webSearch", "mcpToolCall", "dynamicToolCall", "agentMessage", "reasoning"])
     conn().emit("item/started", { ...ids, item: { type, id: type, changes: [] } });
   assert.equal(seen.activity, 4);
+  for (const type of ["commandExecution", "fileChange", "webSearch", "mcpToolCall", "dynamicToolCall", "agentMessage", "reasoning"])
+    conn().emit("item/completed", { ...ids, completedAtMs: 0, item: { type, id: type, changes: [] } });
+  assert.equal(seen.ended, 4);
   conn().finish("th-1", "tu-1", outcome({ outcome: "completed", message: "ok", evidence: ["x"] }));
   await done;
 });

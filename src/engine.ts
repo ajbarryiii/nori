@@ -487,6 +487,12 @@ export class Engine {
         this.store.updateTask(task.id, { usage: { toolCalls } });
         if (toolCalls > this.config.runtime!.budget.toolCalls * current.usage.allowance) this.interrupt(turn, { kind: "limit", limit: "toolCalls" });
       },
+      // Codex's actions cannot be refused before they start, so the turn stops as soon as the last allowed one finishes.
+      activityEnded: () => {
+        if (!live()) return;
+        const current = this.store.task(task.id)!;
+        if (current.usage.toolCalls >= this.config.runtime!.budget.toolCalls * current.usage.allowance) this.interrupt(turn, { kind: "limit", limit: "toolCalls" });
+      },
       usage: total => {
         if (!live() || !Number.isSafeInteger(total) || total < 0) return;
         const current = this.store.task(task.id)!; const limits = this.config.runtime!;
