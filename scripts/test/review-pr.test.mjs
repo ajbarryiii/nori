@@ -64,6 +64,15 @@ if (process.env.FAKE_MODE === 'orphan') {
   writeFileSync(process.env.FAKE_LOG + '.child', text.trim());
   await new Promise(resolve => setTimeout(resolve, 10000));
 }
+if (process.env.FAKE_MODE === 'late') {
+  // An untagged worker orphaned by a launcher that exits; the fake ps reports it as tagged only from its second
+  // environment listing on.
+  const launcher = spawn(process.execPath, ['-e', "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore', env: { PATH: process.env.PATH } }); console.log(c.pid); c.unref();"], {stdio:['ignore','pipe','ignore'], env: { PATH: process.env.PATH }});
+  let text = ''; launcher.stdout.on('data', d => { text += d; });
+  await new Promise(resolve => launcher.once('exit', resolve));
+  writeFileSync(process.env.FAKE_LOG + '.child', text.trim());
+  await new Promise(resolve => setTimeout(resolve, 10000));
+}
 if (process.env.FAKE_MODE === 'hang') await new Promise(resolve => setTimeout(resolve, 10000));
 if (process.env.FAKE_MODE === 'mutate') writeFileSync(join(cwd, 'code.js'), 'modified by reviewer');
 writeFileSync(args[args.indexOf('-o') + 1], process.env.FAKE_MODE === 'malformed' ? 'not JSON' : process.env.FAKE_REVIEW);
@@ -185,6 +194,27 @@ exit 0
   assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /timed out/i); assert.doesNotMatch(r.stderr, /confirmed/);
   const pid = Number(readFileSync(join(f.root, '.git/codex-calls.jsonl.child'), 'utf8'));
   t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+});
+test('a process first seen while the others are being killed is stopped too', async t => {
+  const f = fixture(t);
+  const ps = join(f.root, '.git', 'test-bin', 'ps'); const count = join(f.root, '.git', 'ps-count');
+  const child = join(f.root, '.git', 'codex-calls.jsonl.child');
+  writeFileSync(ps, `#!/bin/sh
+out=$(/bin/ps "$@") || exit $?
+printf '%s\\n' "$out"
+case " $* " in *" -E "*)
+  n=$(cat '${count}' 2>/dev/null || echo 0); n=$((n + 1)); echo $n > '${count}'
+  tag=$(printf '%s\\n' "$out" | grep -o 'NORI_PROCESS_TAG=[0-9a-f][0-9a-f-]*' | head -1)
+  [ $n -gt 1 ] && [ -n "$tag" ] && [ -f '${child}' ] && echo "$(cat '${child}') late $tag";;
+esac
+exit 0
+`); chmodSync(ps, 0o755);
+  const r = f.run([], { FAKE_MODE: 'late', NORI_REVIEW_TIMEOUT_SECONDS: '1' });
+  assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /timed out/i); assert.doesNotMatch(r.stderr, /confirmed/);
+  const pid = Number(readFileSync(child, 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  await new Promise(resolve => setTimeout(resolve, 150));
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 });
 test('a timeout whose processes cannot be confirmed stopped keeps the review lock', async t => {

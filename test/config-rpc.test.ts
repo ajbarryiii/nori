@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { test } from "node:test";
 import { resolve } from "node:path";
 import { parseConfig, requireAssistantUser } from "../src/config.js";
-import { StdioRpc } from "../src/rpc.js";
+import { StdioRpc, type ProcessTable } from "../src/rpc.js";
 
 const contact = { id: "owner", name: "Owner", handles: ["Owner@Example.com"], role: "owner", plugins: ["reminders"],
   conversation: { chatId: 42, chatGuid: "iMessage;-;owner@example.com" } };
@@ -152,6 +152,29 @@ test("a server that exits closes the connection even while something it started 
   await assert.rejects(rpc.request("exit", {}), /closed/);
   assert.equal(await closed, true);
   assert.equal(running(pid), false);
+});
+
+test("a process that is first seen while the others are being killed is stopped too", async t => {
+  // A detached process outside the server's tree, which listings report as tagged only from the second one on.
+  const late = spawn(process.execPath, ["-e", "setTimeout(() => {}, 300000)"], { detached: true, stdio: "ignore" }); late.unref();
+  t.after(() => { try { process.kill(late.pid!, "SIGKILL"); } catch { /* Already gone. */ } });
+  let listings = 0;
+  const table = async (): Promise<ProcessTable> => {
+    const rows = execFileSync("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="], { encoding: "utf8" });
+    const result: ProcessTable = new Map(); listings++;
+    for (const line of rows.split("\n")) {
+      const row = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
+      if (row) result.set(Number(row[1]), { parent: Number(row[2]), group: Number(row[3]), exited: row[4]!.startsWith("Z"),
+        start: row[5]!, tagged: Number(row[1]) === late.pid && listings > 1 });
+    }
+    return result;
+  };
+  let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
+  const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,
+    processTable: table, handlers: { closed: stopped => reported(stopped) } });
+  rpc.close();
+  assert.equal(await closed, true);
+  assert.equal(running(late.pid!), false);
 });
 
 test("a stop that cannot be confirmed is reported as unconfirmed", async t => {

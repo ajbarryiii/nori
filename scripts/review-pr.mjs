@@ -100,45 +100,53 @@ async function processTable(tag) {
  * its id cannot belong to anything else. Returns whether every process was confirmed stopped.
  */
 async function stopTree(root, uncollected, tag) {
-  if (!uncollected()) return true;
-  signal(root, 'SIGSTOP');
+  if (uncollected()) signal(root, 'SIGSTOP');
   const found = new Map();
   try {
-    for (let round = 0; round < 50; round++) {
+    for (let round = 0; round < 50; round++) if (!discover(await processTable(tag), root, uncollected, found)) break;
+    // A process can appear between listings, so every listing is searched again while killing. Stopped means a listing
+    // showed nothing found still running and nothing new.
+    for (let round = 0; round < 40; round++) {
       const table = await processTable(tag);
-      const start = table.get(root)?.start;
-      if (!uncollected()) found.delete(root); else if (start !== undefined && !found.has(root)) found.set(root, start);
-      const own = table.get(process.pid)?.group;
-      // Groups of processes found in this listing, so a group id reused after its members exited is never matched.
-      const groups = new Set();
-      for (const [pid, start] of found) { const entry = table.get(pid); if (entry?.start === start && entry.group !== own) groups.add(entry.group); }
-      let added = false; let grew = true;
-      while (grew) {
-        grew = false;
-        for (const [pid, entry] of table) {
-          if (found.has(pid) || pid === process.pid) continue;
-          const child = found.has(entry.parent) && table.get(entry.parent)?.start === found.get(entry.parent);
-          if (!child && !entry.tagged && !groups.has(entry.group)) continue;
-          signal(pid, 'SIGSTOP'); found.set(pid, entry.start); added = grew = true;
-          if (entry.group !== own) groups.add(entry.group);
-        }
-      }
-      if (!added) break;
-    }
-    for (let round = 0; round < 40 && found.size; round++) {
-      const table = await processTable(tag);
+      const added = discover(table, root, uncollected, found);
       for (const [pid, start] of found) {
         const entry = table.get(pid);
         if (!entry || entry.start !== start || entry.exited || (pid === root && !uncollected())) found.delete(pid);
         else signal(pid, 'SIGKILL');
       }
-      if (found.size) await new Promise(resolve => setTimeout(resolve, 50));
+      if (!found.size && !added) return true;
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
-    return found.size === 0;
+    return false;
   } catch {
     for (const pid of found.keys()) if (pid !== root || uncollected()) signal(pid, 'SIGKILL');
     return false;
   }
+}
+/**
+ * Adds and pauses every running process in the listing that belongs to the tree: the root while it is uncollected, the
+ * children of processes found, tagged processes, and members of a found process's group other than this process's own.
+ * Returns whether any was added.
+ */
+function discover(table, root, uncollected, found) {
+  const rootEntry = table.get(root);
+  if (!uncollected()) found.delete(root); else if (rootEntry && !rootEntry.exited && !found.has(root)) found.set(root, rootEntry.start);
+  const own = table.get(process.pid)?.group;
+  // Groups of processes found in this listing, so a group id reused after its members exited is never matched.
+  const groups = new Set();
+  for (const [pid, start] of found) { const entry = table.get(pid); if (entry?.start === start && entry.group !== own) groups.add(entry.group); }
+  let added = false; let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [pid, entry] of table) {
+      if (found.has(pid) || pid === process.pid || entry.exited) continue;
+      const child = found.has(entry.parent) && table.get(entry.parent)?.start === found.get(entry.parent);
+      if (!child && !entry.tagged && !groups.has(entry.group)) continue;
+      signal(pid, 'SIGSTOP'); found.set(pid, entry.start); added = grew = true;
+      if (entry.group !== own) groups.add(entry.group);
+    }
+  }
+  return added;
 }
 /** Rejects with `unconfirmed` set when a stopped review's processes could not be confirmed stopped. */
 function runCodex(command, args, options, timeout) {
