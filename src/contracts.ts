@@ -47,6 +47,8 @@ export interface RuntimeConfig {
   daily: { tasks: number; tokens: number };
   /** An unanswered approval is denied after this many minutes. */
   approvalMinutes: number;
+  /** How many turns may run at once across all contacts (1–8). A task has at most one turn at a time. */
+  maxJobs: number;
 }
 
 export interface Config {
@@ -328,7 +330,7 @@ export type TurnOutcome =
   | { status: "failed"; message: string }
   | { status: "interrupted" };
 
-/** Runs longer work. Each call runs one turn and resolves when it ends; a lost connection rejects. */
+/** Runs longer work. Each call runs one turn and resolves when it ends; a lost connection rejects. Turns of different tasks may overlap. */
 export interface Runtime {
   manifest: RuntimeManifest;
   /** Starts a thread for the task and runs its first turn with the full request text. */

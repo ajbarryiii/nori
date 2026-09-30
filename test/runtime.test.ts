@@ -156,7 +156,7 @@ for (const throws of [false, true]) {
 test("with a runtime, the service recovers interrupted turns, runs routed jobs, and waits for the runtime to close on shutdown", async t => {
   const store = new Store(":memory:"); t.after(() => store.close()); enrollAt(store, undefined, 0, "db");
   const cfg = { ...config, runtime: { codexPath: "/usr/local/bin/codex", model: null, workspaceDir: "/tmp/nori-work",
-    budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 1_000_000 }, daily: { tasks: 5, tokens: 5_000_000 }, approvalMinutes: 60 } };
+    budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 1_000_000 }, daily: { tasks: 5, tokens: 5_000_000 }, approvalMinutes: 60, maxJobs: 1 } };
   const transport = new FakeTransport(); const controller = new AbortController();
   new Engine(cfg, store, transport, { clock: () => epoch }).acceptPage("owner", page([message("check the weather"), message("research a laptop", 2)]));
   store.updateTask(store.tasks()[0]!.id, { state: "running", threadId: "thread-old" });
@@ -179,12 +179,40 @@ test("with a runtime, the service recovers interrupted turns, runs routed jobs, 
   assert.ok(closed >= 1);
 });
 
+test("the service refills a free job slot while other jobs are still running", async t => {
+  const store = new Store(":memory:"); t.after(() => store.close()); enrollAt(store, undefined, 0, "db");
+  const cfg = { ...config, runtime: { codexPath: "/usr/local/bin/codex", model: null, workspaceDir: "/tmp/nori-work",
+    budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 1_000_000 }, daily: { tasks: 5, tokens: 5_000_000 }, approvalMinutes: 60, maxJobs: 2 } };
+  const transport = new FakeTransport(); const controller = new AbortController();
+  new Engine(cfg, store, transport, { clock: () => epoch })
+    .acceptPage("owner", page([message("research a laptop"), message("research a phone", 2), message("research a tablet", 3)]));
+  const finish = new Map<string, (outcome: TurnOutcome) => void>();
+  const runtime: Runtime = {
+    manifest: { id: "codex", computerUse: "unverified", ownerOnly: true }, halted: null,
+    start: task => new Promise<TurnOutcome>(resolve => { finish.set(task.text, resolve); }),
+    resume: async () => ({ status: "interrupted" }), cancel: async () => {},
+    close: async () => { for (const end of finish.values()) end({ status: "interrupted" }); },
+  };
+  const service = runService({ config: cfg, store, transport, checkIdentity: () => {}, signal: controller.signal, runtime,
+    wait: async () => { await new Promise<void>(resolve => setImmediate(resolve)); } });
+  const settle = async () => { for (let n = 0; n < 10; n++) await new Promise<void>(resolve => setImmediate(resolve)); };
+  await settle();
+  assert.deepEqual([...finish.keys()], ["research a laptop", "research a phone"]);
+  finish.get("research a phone")!({ status: "completed", message: "The Pixel.", evidence: ["Compared two"] });
+  await settle();
+  assert.deepEqual([...finish.keys()], ["research a laptop", "research a phone", "research a tablet"]);
+  assert.deepEqual(store.tasks().map(x => x.state), ["running", "completed", "running"]);
+  controller.abort(); await service;
+  assert.deepEqual(store.tasks().map(x => [x.state, x.waitingFor]),
+    [["waiting_contact", { kind: "interrupted" }], ["completed", null], ["waiting_contact", { kind: "interrupted" }]]);
+});
+
 test("a runtime that halts stops the service with its reason, even during shutdown", async t => {
   const reason = "Codex commands from a closed connection could not be confirmed stopped.";
   for (const during of ["run", "shutdown"] as const) {
     const store = new Store(":memory:"); t.after(() => store.close()); enrollAt(store, undefined, 0, "db");
     const cfg = { ...config, runtime: { codexPath: "/usr/local/bin/codex", model: null, workspaceDir: "/tmp/nori-work",
-      budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 1_000_000 }, daily: { tasks: 5, tokens: 5_000_000 }, approvalMinutes: 60 } };
+      budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 1_000_000 }, daily: { tasks: 5, tokens: 5_000_000 }, approvalMinutes: 60, maxJobs: 1 } };
     const transport = new FakeTransport(); const controller = new AbortController(); let ticks = 0;
     const runtime: Runtime = {
       manifest: { id: "codex", computerUse: "unverified", ownerOnly: true }, halted: null,

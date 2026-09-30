@@ -138,15 +138,16 @@ The runtime is off until `runtime` is set in the configuration. It is owner-only
      "workspaceDir": "/Users/receipts/Library/Application Support/Nori/workspaces",
      "budget": { "minutes": 30, "turns": 8, "toolCalls": 40, "tokens": 2000000 },
      "daily": { "tasks": 20, "tokens": 10000000 },
-     "approvalMinutes": 60
+     "approvalMinutes": 60,
+     "maxJobs": 1
    }
    ```
 
-   `model: null` uses the Codex default for that login. `doctor` reports whether the runtime is configured; `run` refuses to start if `codexPath` is not executable.
+   `model: null` uses the Codex default for that login. `maxJobs` (1–8) is how many jobs may run at once; they share one Codex connection, so when Nori has to close it (an interrupt or turn start it cannot confirm, or a shutdown) every running job is interrupted and waits for `continue #n`. `doctor` reports whether the runtime is configured; `run` refuses to start if `codexPath` is not executable.
 
 How a job behaves over iMessage:
 
-- An unmatched request gets one acknowledgement (`Got it — job #3 …`). Codex starts it in a new thread, in a private directory `workspaces/task-<id>`, with the `workspace-write` sandbox. Jobs run one at a time; others wait to start.
+- An unmatched request gets one acknowledgement (`Got it — job #3 …`). Codex starts it in a new thread, in a private directory `workspaces/task-<id>`, with the `workspace-write` sandbox. Up to `maxJobs` jobs run at once; others wait to start, oldest first.
 - Codex's result arrives as `Job #3 is done. …` only when it reports what it checked. A question arrives as `Job #3 asks: …`; reply normally to answer it, or `#3 <answer>` when several jobs are waiting. `#3 <text>` also adds instructions to a running job for its next step.
 - When Codex needs to leave the sandbox (network access, files outside the job directory) or calls a high-impact plugin tool, Nori asks `Job #3 needs your OK to …` with the exact command, the files it would change, any extra access, or the tool's full arguments. Reply with the code from that message, for example `approve A7` or `deny A7`; a code only ever answers its own request. A job asks one approval at a time. Unanswered or overdue requests are refused after `approvalMinutes`, and anything too long to show in full is refused without asking.
 - Reaching a time, turn, tool-call, or usage limit pauses the job with a message; `continue #3` allows one more allowance. Daily limits hold new jobs until the next day. `status` lists running, waiting, paused, and waiting-to-start jobs.

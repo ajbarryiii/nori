@@ -43,14 +43,15 @@ test("the Codex runtime needs absolute paths and bounded budgets", () => {
   const codexPath = "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex";
   assert.equal(parseConfig(input).runtime, null);
   assert.deepEqual(parseConfig({ ...input, runtime: { codexPath } }).runtime, { codexPath, model: null, workspaceDir: "/tmp/nori/workspaces",
-    budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 2_000_000 }, daily: { tasks: 20, tokens: 10_000_000 }, approvalMinutes: 60 });
+    budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 2_000_000 }, daily: { tasks: 20, tokens: 10_000_000 }, approvalMinutes: 60, maxJobs: 1 });
   const custom = { codexPath, model: "gpt-6-astra", workspaceDir: "/tmp/work", budget: { minutes: 10, turns: 2, toolCalls: 5, tokens: 1000 },
-    daily: { tasks: 3, tokens: 9000 }, approvalMinutes: 15 };
+    daily: { tasks: 3, tokens: 9000 }, approvalMinutes: 15, maxJobs: 3 };
   assert.deepEqual(parseConfig({ ...input, runtime: custom }).runtime, custom);
   assert.deepEqual(parseConfig({ ...input, runtime: { codexPath, budget: { minutes: 5 } } }).runtime?.budget,
     { minutes: 5, turns: 8, toolCalls: 40, tokens: 2_000_000 });
   for (const bad of [{ codexPath: "codex" }, { codexPath, workspaceDir: "work" }, { codexPath, model: "" }, { codexPath, budget: { minutes: 0 } },
     { codexPath, budget: { turns: 1.5 } }, { codexPath, daily: { tasks: -1 } }, { codexPath, approvalMinutes: 0 }, { codexPath, approvalMinutes: 2000 },
+    { codexPath, maxJobs: 0 }, { codexPath, maxJobs: 9 }, { codexPath, maxJobs: 1.5 },
     { codexPath, budget: [] }, "codex"]) assert.throws(() => parseConfig({ ...input, runtime: bad }), JSON.stringify(bad));
 });
 

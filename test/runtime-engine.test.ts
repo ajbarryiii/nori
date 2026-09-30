@@ -7,13 +7,13 @@ import type { ActionPlugin, Config, Contact, IntentRouter, Runtime, RuntimeConfi
   TurnOutcome } from "../src/contracts.js";
 import { config, enroll, epoch, FakeTransport, member, message, messageFrom, owner, page, reminders } from "./helpers.js";
 
-type Turn = (events: RuntimeEvents, input: string) => Promise<TurnOutcome>;
+type Turn = (events: RuntimeEvents, input: string, taskId: number) => Promise<TurnOutcome>;
 class FakeRuntime implements Runtime {
   manifest = { id: "codex", computerUse: "unverified" as const, ownerOnly: true };
   turns: Turn[] = [];
   calls: Array<{ kind: "start" | "resume"; task: number; input: string; tools: string[]; threadId: string | null }> = [];
   cancelled: number[] = [];
-  onCancel: (() => void) | null = null;
+  onCancel: ((taskId: number) => void) | null = null;
   halted: string | null = null;
   async start(task: Task, tools: readonly RuntimeTool[], events: RuntimeEvents) { return this.run("start", task, task.text, tools, events); }
   async resume(task: Task, input: string, tools: readonly RuntimeTool[], events: RuntimeEvents) { return this.run("resume", task, input, tools, events); }
@@ -21,9 +21,9 @@ class FakeRuntime implements Runtime {
     this.calls.push({ kind, task: task.id, input, tools: tools.map(t => t.name), threadId: task.threadId });
     events.started({ threadId: task.threadId ?? `thread-${task.id}`, turnId: `turn-${this.calls.length}` });
     const turn = this.turns.shift() ?? (async () => ({ status: "completed", message: "Done.", evidence: ["checked"] }) as TurnOutcome);
-    return turn(events, input);
+    return turn(events, input, task.id);
   }
-  async cancel(taskId: number) { this.cancelled.push(taskId); this.onCancel?.(); }
+  async cancel(taskId: number) { this.cancelled.push(taskId); this.onCancel?.(taskId); }
   async close() {}
 }
 
@@ -31,13 +31,18 @@ class FakeRuntime implements Runtime {
 function held(fake: FakeRuntime) {
   let finish!: (outcome: TurnOutcome) => void; let events: RuntimeEvents | undefined;
   const done = new Promise<TurnOutcome>(resolve => { finish = resolve; });
-  fake.turns.push(async e => { events = e; fake.onCancel = () => finish({ status: "interrupted" }); return done; });
+  fake.turns.push(async (e, _input, taskId) => {
+    events = e; const previous = fake.onCancel;
+    // Each held turn answers a cancel for its own task only.
+    fake.onCancel = id => { if (id === taskId) finish({ status: "interrupted" }); else previous?.(id); };
+    return done;
+  });
   return { finish: (outcome: TurnOutcome) => finish(outcome), events: () => events! };
 }
 const S = "[Sent 2026-09-28T16:00:00.000Z] ";
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 const runtimeConfig: RuntimeConfig = { codexPath: "/usr/local/bin/codex", model: null, workspaceDir: "/tmp/nori-work",
-  budget: { minutes: 30, turns: 3, toolCalls: 2, tokens: 1000 }, daily: { tasks: 5, tokens: 5000 }, approvalMinutes: 60 };
+  budget: { minutes: 30, turns: 3, toolCalls: 2, tokens: 1000 }, daily: { tasks: 5, tokens: 5000 }, approvalMinutes: 60, maxJobs: 1 };
 const withRuntime: Config = { ...config, contacts: [owner, member], runtime: runtimeConfig };
 
 function setup(t: { after(fn: () => void): void }, cfg: Config = withRuntime, plugins: ActionPlugin[] = [remindersPlugin]) {
@@ -399,6 +404,65 @@ test("runtime turns run one at a time, and daily limits hold new tasks until the
   assert.match(store.outbox().at(-1)!.text, /Waiting to start: #2\.\nToday's Codex limit is reached; waiting jobs start tomorrow\./);
   advance(24 * 60 * 60_000); await engine.runTasks();
   assert.equal(runtime.calls.length, 2);
+});
+
+test("up to maxJobs turns run at once, and the oldest waiting job takes the next free slot", async t => {
+  const { engine, store, runtime } = setup(t, { ...withRuntime, runtime: { ...runtimeConfig, maxJobs: 2 } });
+  engine.acceptPage("owner", page([message("research a laptop"), message("research a phone", 2), message("research a tablet", 3)]));
+  await engine.routeTasks(null);
+  const first = held(runtime); const second = held(runtime);
+  const { done: run } = await started(engine);
+  assert.deepEqual(runtime.calls.map(c => c.input), ["research a laptop", "research a phone"]);
+  assert.deepEqual(store.tasks().map(x => x.state), ["running", "running", "routed"]);
+  // A call while every slot is taken starts nothing and does not wait for the running turns.
+  await engine.runTasks();
+  assert.equal(runtime.calls.length, 2);
+  second.finish({ status: "completed", message: "The Pixel.", evidence: ["Compared two"] }); await flush();
+  const third = held(runtime);
+  const { done: refill } = await started(engine);
+  assert.deepEqual(runtime.calls.map(c => c.input), ["research a laptop", "research a phone", "research a tablet"]);
+  assert.deepEqual(store.tasks().map(x => x.state), ["running", "completed", "running"]);
+  first.finish({ status: "completed", message: "The X1.", evidence: ["Compared three"] }); await run;
+  third.finish({ status: "completed", message: "The iPad.", evidence: ["Compared four"] }); await refill;
+  assert.deepEqual(store.tasks().map(x => x.state), ["completed", "completed", "completed"]);
+});
+
+test("cancelling one of several running jobs leaves the others running", async t => {
+  const { engine, store, runtime, texts } = setup(t, { ...withRuntime, runtime: { ...runtimeConfig, maxJobs: 2 } });
+  engine.acceptPage("owner", page([message("research a laptop"), message("research a phone", 2)]));
+  await engine.routeTasks(null);
+  held(runtime); const second = held(runtime);
+  const { done: run } = await started(engine);
+  engine.acceptPage("owner", page([message("cancel #1", 3)]));
+  await flush();
+  assert.deepEqual(runtime.cancelled, [store.tasks()[0]!.id]);
+  assert.deepEqual(store.tasks().map(x => x.state), ["cancelled", "running"]);
+  assert.equal(texts().at(-1), "Stopped job #1. Anything it already did stays done.");
+  second.finish({ status: "completed", message: "The Pixel.", evidence: ["Compared two"] }); await run;
+  assert.deepEqual(store.tasks().map(x => x.state), ["cancelled", "completed"]);
+});
+
+test("running jobs ask for approval independently", async t => {
+  const { engine, store, runtime, texts } = setup(t, { ...withRuntime, runtime: { ...runtimeConfig, maxJobs: 2 } });
+  engine.acceptPage("owner", page([message("check the weather service"), message("check the train times", 2)]));
+  await engine.routeTasks(null);
+  const decisions: Array<[string, boolean]> = [];
+  for (const detail of ["curl https://weather.example", "curl https://trains.example"]) runtime.turns.push(async events => {
+    decisions.push([detail, await events.approval({ operation: "run a command", detail })]);
+    return { status: "completed", message: "Checked.", evidence: [detail] };
+  });
+  const { done: run } = await started(engine);
+  assert.deepEqual(store.tasks().map(x => x.waitingFor), [{ kind: "approval" }, { kind: "approval" }]);
+  assert.match(texts().at(-2)!, /^Job #1 needs your OK to run a command: curl https:\/\/weather\.example\nReply ‘approve A1’/);
+  assert.match(texts().at(-1)!, /^Job #2 needs your OK to run a command: curl https:\/\/trains\.example\nReply ‘approve A2’/);
+  engine.acceptPage("owner", page([message("deny A2", 3)]));
+  await flush();
+  assert.deepEqual(decisions, [["curl https://trains.example", false]]);
+  assert.deepEqual(store.tasks().map(x => x.state), ["waiting_contact", "completed"]);
+  engine.acceptPage("owner", page([message("approve A1", 4)]));
+  await run;
+  assert.deepEqual(decisions, [["curl https://trains.example", false], ["curl https://weather.example", true]]);
+  assert.deepEqual(store.tasks().map(x => x.state), ["completed", "completed"]);
 });
 
 test("stop interrupts only the sender's running job", async t => {

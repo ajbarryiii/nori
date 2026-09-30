@@ -94,7 +94,8 @@ function parseRuntime(value: unknown, dataDir: string): Config["runtime"] {
       toolCalls: limit(budget, "toolCalls", "runtime.budget.toolCalls", 40, 1000),
       tokens: limit(budget, "tokens", "runtime.budget.tokens", 2_000_000, 100_000_000) },
     daily: { tasks: limit(daily, "tasks", "runtime.daily.tasks", 20, 1000), tokens: limit(daily, "tokens", "runtime.daily.tokens", 10_000_000, 1_000_000_000) },
-    approvalMinutes: limit(value, "approvalMinutes", "runtime.approvalMinutes", 60, 1440) };
+    approvalMinutes: limit(value, "approvalMinutes", "runtime.approvalMinutes", 60, 1440),
+    maxJobs: limit(value, "maxJobs", "runtime.maxJobs", 1, 8) };
 }
 
 export function parseConfig(value: unknown): Config {
