@@ -322,6 +322,22 @@ test("several tasks' turns run at once on one connection, and closing it ends th
   await assert.rejects(third, /disconnected/);
 });
 
+test("shutdown refuses a start still waiting for an earlier close, so no connection opens after it", async t => {
+  const { runtime, connections, conn, events } = setup(t);
+  const active = runtime.start(task(1), [], events); await flush();
+  conn().holdClose = true;
+  void runtime.close();
+  const waiting = runtime.start(task(2), [], events); await flush();
+  let stopped = false; const stopping = runtime.shutdown().then(() => { stopped = true; });
+  await flush();
+  assert.equal(stopped, false);
+  connections[0]!.finishClose();
+  await assert.rejects(active, /disconnected/); await stopping;
+  await assert.rejects(waiting, /shut down/);
+  await assert.rejects(runtime.resume(task(3, "th-3"), "again", [], events), /shut down/);
+  assert.equal(connections.length, 1);
+});
+
 test("a connection that fails to initialize is stopped before the start fails or the runtime counts as closed", async t => {
   const { runtime, connections, events, onConnect } = setup(t);
   onConnect(c => { c.failInitialize = true; c.holdClose = true; });

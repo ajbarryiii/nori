@@ -340,10 +340,15 @@ export interface Runtime {
   /** Interrupts the task's active turn, if any. */
   cancel(taskId: number): Promise<void>;
   /**
-   * Stops the runtime. Active turns end, and the promise resolves, only once every process it started has exited or the
-   * runtime has halted.
+   * Stops the runtime's current processes. Active turns end, and the promise resolves, only once every process it started
+   * has exited or the runtime has halted. A later start or resume may run again.
    */
   close(): Promise<void>;
+  /**
+   * Stops the runtime for good, as `close` does, and refuses every start or resume, including those still waiting for an
+   * earlier close to finish, so nothing runs after the service has stopped.
+   */
+  shutdown(): Promise<void>;
   /**
    * Why the runtime stopped for good: processes it started could not be confirmed stopped. It then starts nothing more,
    * and the service stops with this reason and keeps its lock until the operator has checked.

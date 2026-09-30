@@ -165,7 +165,7 @@ test("with a runtime, the service recovers interrupted turns, runs routed jobs, 
   const runtime: Runtime = {
     manifest: { id: "codex", computerUse: "unverified", ownerOnly: true },
     start: async task => { started.push(task.text); controller.abort(); return { status: "completed", message: "Found it.", evidence: ["Checked"] } as TurnOutcome; },
-    resume: async () => ({ status: "interrupted" }), cancel: async () => {}, close: () => { closed++; return released; }, halted: null,
+    resume: async () => ({ status: "interrupted" }), cancel: async () => {}, close: async () => {}, shutdown: () => { closed++; return released; }, halted: null,
   };
   let finished = false;
   const service = runService({ config: cfg, store, transport, checkIdentity: () => {}, signal: controller.signal, runtime,
@@ -191,7 +191,7 @@ test("the service refills a free job slot while other jobs are still running", a
     manifest: { id: "codex", computerUse: "unverified", ownerOnly: true }, halted: null,
     start: task => new Promise<TurnOutcome>(resolve => { finish.set(task.text, resolve); }),
     resume: async () => ({ status: "interrupted" }), cancel: async () => {},
-    close: async () => { for (const end of finish.values()) end({ status: "interrupted" }); },
+    close: async () => {}, shutdown: async () => { for (const end of finish.values()) end({ status: "interrupted" }); },
   };
   const service = runService({ config: cfg, store, transport, checkIdentity: () => {}, signal: controller.signal, runtime,
     wait: async () => { await new Promise<void>(resolve => setImmediate(resolve)); } });
@@ -217,7 +217,7 @@ test("a runtime that halts stops the service with its reason, even during shutdo
     const runtime: Runtime = {
       manifest: { id: "codex", computerUse: "unverified", ownerOnly: true }, halted: null,
       start: async () => ({ status: "interrupted" }), resume: async () => ({ status: "interrupted" }), cancel: async () => {},
-      close: async () => { if (during === "shutdown") runtime.halted = reason; },
+      close: async () => {}, shutdown: async () => { if (during === "shutdown") runtime.halted = reason; },
     };
     await assert.rejects(runService({ config: cfg, store, transport, checkIdentity: () => {}, signal: controller.signal, runtime,
       wait: async () => {

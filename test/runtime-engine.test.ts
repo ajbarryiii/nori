@@ -25,6 +25,7 @@ class FakeRuntime implements Runtime {
   }
   async cancel(taskId: number) { this.cancelled.push(taskId); this.onCancel?.(taskId); }
   async close() {}
+  async shutdown() {}
 }
 
 /** A turn that stays active until the test finishes it or the engine cancels it. */

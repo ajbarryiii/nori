@@ -81,8 +81,8 @@ export async function runService(options: { config: Config; store: Store; transp
     },
   };
   const core = new Engine(config, store, guarded, { ...(options.plugins ? { plugins: options.plugins } : {}), ...(runtime ? { runtime } : {}) });
-  // Closing the runtime ends an active turn, which leaves its task interrupted until the contact continues it.
-  const stop = () => { stopped = true; transport.close(); return runtime?.close(); };
+  // Shutting the runtime down ends active turns, which leaves their tasks interrupted until the contact continues them.
+  const stop = () => { stopped = true; transport.close(); return runtime?.shutdown(); };
   signal.addEventListener("abort", stop, { once: true });
   try {
     store.recoverInFlight();
