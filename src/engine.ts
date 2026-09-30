@@ -42,6 +42,8 @@ export class Engine {
   private readonly clock: () => number;
   private readonly runtime: Runtime | null;
   private readonly active = new Map<number, ActiveTurn>();
+  /** Every started turn until it settles, including after its result was recorded, so shutdown can wait for all of them. */
+  private readonly turns = new Set<Promise<void>>();
   private deferred: Array<() => void> | null = null;
   private sending = false;
 
@@ -418,7 +420,8 @@ export class Engine {
 
   /**
    * Starts or resumes routed tasks, oldest first, while fewer than `maxJobs` turns are running, and resolves when the
-   * turns it started have ended. Safe to call again while they run: later calls fill only the free slots. Intake,
+   * turns it started have ended. It rejects as soon as one of them cannot record its result, without waiting for the
+   * others; `idle` waits for those. Safe to call again while turns run: later calls fill only the free slots. Intake,
    * timers, and engine commands stay responsive meanwhile.
    */
   async runTasks(shouldContinue: () => boolean = () => true): Promise<void> {
@@ -429,9 +432,12 @@ export class Engine {
       if (next === null) break;
       if (next !== "held") turns.push(next);
     }
-    // Every turn is awaited before an error is reported, so the service never stops waiting while a turn still runs.
-    const failed = (await Promise.allSettled(turns)).find(x => x.status === "rejected");
-    if (failed) throw failed.reason;
+    await Promise.all(turns);
+  }
+
+  /** Resolves once every turn started so far has ended, whether or not its result could be recorded. */
+  async idle(): Promise<void> {
+    while (this.turns.size) await Promise.allSettled(this.turns);
   }
 
   /**
@@ -471,7 +477,7 @@ export class Engine {
     if (!claimed) return "held";
     const turn: ActiveTurn = { taskId: task.id, since: now, approvals: new Map(), limit: null, gate: Promise.resolve(), sent, calls: new Map() };
     this.active.set(task.id, turn);
-    return (async () => {
+    const running = (async () => {
       let outcome: TurnOutcome;
       try {
         const current = this.store.task(task.id)!; const tools = this.host.tools(contact); const events = this.events(current, contact, turn);
@@ -480,6 +486,9 @@ export class Engine {
       } catch { outcome = { status: "interrupted" }; }
       this.finishTurn(contact, turn, outcome);
     })();
+    this.turns.add(running);
+    void running.catch(() => {}).finally(() => { this.turns.delete(running); });
+    return running;
   }
 
   private events(task: Task, contact: Contact, turn: ActiveTurn): RuntimeEvents {

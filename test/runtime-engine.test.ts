@@ -428,6 +428,24 @@ test("up to maxJobs turns run at once, and the oldest waiting job takes the next
   assert.deepEqual(store.tasks().map(x => x.state), ["completed", "completed", "completed"]);
 });
 
+test("a turn whose result cannot be recorded is reported at once, while idle still waits for the other turns", async t => {
+  const { engine, store, runtime } = setup(t, { ...withRuntime, runtime: { ...runtimeConfig, maxJobs: 2 } });
+  engine.acceptPage("owner", page([message("research a laptop"), message("research a phone", 2)]));
+  await engine.routeTasks(null);
+  const first = held(runtime); const second = held(runtime);
+  const { done: run } = await started(engine);
+  const failing = store.tasks()[1]!.id; const update = store.updateTask.bind(store);
+  store.updateTask = (id, ...rest) => { if (id === failing) throw new Error("disk full"); return update(id, ...rest); };
+  let idle = false; const waiting = engine.idle().then(() => { idle = true; });
+  second.finish({ status: "completed", message: "The Pixel.", evidence: ["Compared two"] });
+  await assert.rejects(run, /disk full/);
+  await flush();
+  assert.equal(idle, false);
+  first.finish({ status: "completed", message: "The X1.", evidence: ["Compared three"] });
+  await waiting;
+  assert.equal(store.tasks()[0]?.state, "completed");
+});
+
 test("cancelling one of several running jobs leaves the others running", async t => {
   const { engine, store, runtime, texts } = setup(t, { ...withRuntime, runtime: { ...runtimeConfig, maxJobs: 2 } });
   engine.acceptPage("owner", page([message("research a laptop"), message("research a phone", 2)]));

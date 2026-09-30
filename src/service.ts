@@ -108,7 +108,7 @@ export async function runService(options: { config: Config; store: Store; transp
   finally {
     // The caller releases the service lock after this returns, so wait until the runtime's processes have exited.
     const closed = stop(); signal.removeEventListener("abort", stop);
-    await Promise.allSettled([sending, routing, ...working, closed]);
+    await Promise.allSettled([sending, routing, ...working, core.idle(), closed]);
     store.recoverInFlight();
   }
   // Even after a requested stop: the operator must check for Codex commands still running before Nori runs again.
