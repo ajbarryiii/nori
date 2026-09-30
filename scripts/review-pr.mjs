@@ -116,11 +116,12 @@ async function stopTree(root, uncollected, tag) {
       const added = discover(table, root, uncollected, found);
       for (const [pid, seen] of found) {
         const entry = table.get(pid);
-        // One first seen only in the environment listing gets its start time once the process listing shows it.
-        const start = seen ?? entry?.start ?? null;
-        if (start !== seen) found.set(pid, start);
-        if (!entry || entry.start !== start || entry.exited || (pid === root && !uncollected())) found.delete(pid);
-        else signal(pid, 'SIGKILL');
+        if (!entry || entry.exited || (pid === root && !uncollected())) { found.delete(pid); continue; }
+        // A different start time means the id was reused, unless the process carries the tag, which makes it ours either
+        // way; a missing one means only the environment listing saw it.
+        if (entry.start !== null && entry.start !== seen && seen !== null && !entry.tagged) { found.delete(pid); continue; }
+        if (entry.start !== null) found.set(pid, entry.start);
+        signal(pid, 'SIGKILL');
       }
       if (!found.size && !added) return true;
       await new Promise(resolve => setTimeout(resolve, 50));
@@ -291,7 +292,12 @@ async function main(args) {
       if (/^0+$/.test(local)) continue;
       const head = commit(root, local);
       const fullBase = git(root, ['rev-parse', '--symbolic-full-name', '--verify', '--end-of-options', baseRef]);
-      const baseBranch = fullBase.replace(/^refs\/remotes\/[^/]+\//, '').replace(/^refs\/heads\//, '');
+      // Remote names may contain slashes, so strip the longest configured remote whose tracking prefix matches; without
+      // one, the first path segment is the remote.
+      const remotes = git(root, ['remote']).split('\n').filter(Boolean).sort((a, b) => b.length - a.length);
+      const tracking = remotes.find(name => fullBase.startsWith(`refs/remotes/${name}/`));
+      const baseBranch = tracking ? fullBase.slice(`refs/remotes/${tracking}/`.length)
+        : fullBase.replace(/^refs\/remotes\/[^/]+\//, '').replace(/^refs\/heads\//, '');
       const base = remoteRef === `refs/heads/${baseBranch}` && !/^0+$/.test(remote)
         ? commit(root, remote) : git(root, ['merge-base', commit(root, baseRef), head]);
       scopes.push({ base, head });

@@ -294,6 +294,14 @@ test('replacement objects cannot make a changed push look unchanged', t => {
   assert.equal(r.status, 0, r.stderr); assert.equal(f.calls().length, 1);
   assert.equal(f.calls()[0].source, 'export const value = 2;\n');
 });
+test('a base on a remote whose name contains slashes still compares the pushed branch', t => {
+  const f = fixture(t);
+  git(f.root, 'remote', 'add', 'team/upstream', f.root);
+  git(f.root, 'update-ref', 'refs/remotes/team/upstream/main', f.head);
+  git(f.root, 'config', 'nori.reviewBase', 'team/upstream/main');
+  const r = f.run(['--pre-push', 'team/upstream', 'unused'], {}, `refs/heads/main ${f.head} refs/heads/main ${f.base}\n`);
+  assert.equal(r.status, 0, r.stderr); assert.equal(f.calls().length, 1); assert.ok(f.calls()[0].prompt.includes(f.base));
+});
 test('deletion and empty diffs skip model calls', t => {
   const f = fixture(t); const zero = '0'.repeat(40);
   assert.equal(f.run(['--pre-push', 'origin', 'unused'], {}, `(delete) ${zero} refs/heads/old ${f.head}\n`).status, 0);

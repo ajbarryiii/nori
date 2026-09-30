@@ -187,6 +187,33 @@ test("a tagged process missing from the separate process listing is kept, with n
   ]);
 });
 
+test("a tagged process found earlier stays tracked when a later listing shows a missing or different start time", async t => {
+  for (const later of [{ parent: 0, group: null, start: null }, { parent: 1, group: 1, start: "Thu Jan  1 00:00:00 2099" }]) {
+    const late = spawn(process.execPath, ["-e", "setTimeout(() => {}, 300000)"], { detached: true, stdio: "ignore" }); late.unref();
+    t.after(() => { try { process.kill(late.pid!, "SIGKILL"); } catch { /* Already gone. */ } });
+    let listings = 0;
+    const table = async (): Promise<ProcessTable> => {
+      const rows = execFileSync("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="], { encoding: "utf8" });
+      const result: ProcessTable = new Map(); listings++;
+      for (const line of rows.split("\n")) {
+        const row = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
+        if (row) result.set(Number(row[1]), { parent: Number(row[2]), group: Number(row[3]), exited: row[4]!.startsWith("Z"),
+          start: row[5]!, tagged: Number(row[1]) === late.pid });
+      }
+      // The first listing while killing shows the tagged process with other start-time metadata.
+      if (listings === 3 && result.has(late.pid!)) result.set(late.pid!, { ...later, exited: false, tagged: true });
+      return result;
+    };
+    let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
+    const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,
+      processTable: table, handlers: { closed: stopped => reported(stopped) } });
+    // The server exits first, so the tagged process is the only one left to stop.
+    await assert.rejects(rpc.request("exit", {}), /closed/);
+    assert.equal(await closed, true, JSON.stringify(later));
+    assert.equal(running(late.pid!), false, JSON.stringify(later));
+  }
+});
+
 test("a stop that cannot be confirmed is reported as unconfirmed", async t => {
   let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
   const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,

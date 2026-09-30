@@ -68,11 +68,12 @@ async function freezeAndKill(root: number, uncollected: () => boolean, list: () 
     const added = discover(table, root, uncollected, found);
     for (const [pid, seen] of found) {
       const entry = table.get(pid);
-      // One first seen only in the environment listing gets its start time once the process listing shows it.
-      const start = seen ?? entry?.start ?? null;
-      if (start !== seen) found.set(pid, start);
-      if (!entry || entry.start !== start || entry.exited || (pid === root && !uncollected())) found.delete(pid);
-      else signal(pid, "SIGKILL");
+      if (!entry || entry.exited || (pid === root && !uncollected())) { found.delete(pid); continue; }
+      // A different start time means the id was reused, unless the process carries the tag, which makes it ours either
+      // way; a missing one means only the environment listing saw it.
+      if (entry.start !== null && entry.start !== seen && seen !== null && !entry.tagged) { found.delete(pid); continue; }
+      if (entry.start !== null) found.set(pid, entry.start);
+      signal(pid, "SIGKILL");
     }
     if (!found.size && !added) return true;
     await delay(50);
