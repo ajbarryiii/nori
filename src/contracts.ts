@@ -47,6 +47,8 @@ export interface RuntimeConfig {
   daily: { tasks: number; tokens: number };
   /** An unanswered approval is denied after this many minutes. */
   approvalMinutes: number;
+  /** How many turns may run at once across all contacts (1–8). A task has at most one turn at a time. */
+  maxJobs: number;
 }
 
 export interface Config {
@@ -328,7 +330,7 @@ export type TurnOutcome =
   | { status: "failed"; message: string }
   | { status: "interrupted" };
 
-/** Runs longer work. Each call runs one turn and resolves when it ends; a lost connection rejects. */
+/** Runs longer work. Each call runs one turn and resolves when it ends; a lost connection rejects. Turns of different tasks may overlap. */
 export interface Runtime {
   manifest: RuntimeManifest;
   /** Starts a thread for the task and runs its first turn with the full request text. */
@@ -338,10 +340,15 @@ export interface Runtime {
   /** Interrupts the task's active turn, if any. */
   cancel(taskId: number): Promise<void>;
   /**
-   * Stops the runtime. Active turns end, and the promise resolves, only once every process it started has exited or the
-   * runtime has halted.
+   * Stops the runtime's current processes. Active turns end, and the promise resolves, only once every process it started
+   * has exited or the runtime has halted. A later start or resume may run again.
    */
   close(): Promise<void>;
+  /**
+   * Stops the runtime for good, as `close` does, and refuses every start or resume, including those still waiting for an
+   * earlier close to finish, so nothing runs after the service has stopped.
+   */
+  shutdown(): Promise<void>;
   /**
    * Why the runtime stopped for good: processes it started could not be confirmed stopped. It then starts nothing more,
    * and the service stops with this reason and keeps its lock until the operator has checked.

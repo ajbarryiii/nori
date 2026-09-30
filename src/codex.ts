@@ -141,6 +141,8 @@ export class CodexRuntime implements Runtime {
   readonly manifest = { id: "codex", computerUse: "unverified", ownerOnly: true } as const;
   private connection: Connection | null = null;
   halted: string | null = null;
+  /** Set by shutdown. Every start or resume after it, or still waiting for a connection, is refused. */
+  private stopped = false;
   private readonly turns = new Map<string, ActiveTurn>();
   /** Tasks between start/resume and turn registration. A cancel arriving then stops the turn from starting. */
   private readonly starting = new Map<number, { cancelled: boolean }>();
@@ -234,6 +236,11 @@ export class CodexRuntime implements Runtime {
     return connection.done;
   }
 
+  shutdown(): Promise<void> {
+    this.stopped = true;
+    return this.close();
+  }
+
   private settings(taskId: number): Record<string, unknown> {
     return { cwd: this.workspace(taskId), approvalPolicy: "on-request", approvalsReviewer: "user", sandbox: "workspace-write",
       developerInstructions: this.instructions(), ...(this.options.model ? { model: this.options.model } : {}) };
@@ -257,6 +264,7 @@ export class CodexRuntime implements Runtime {
     // A new app-server starts only after the one being closed has stopped, so two jobs' commands never overlap.
     while (this.connection?.closing) await this.connection.done;
     if (this.halted) throw new Error(this.halted);
+    if (this.stopped) throw new Error("The Codex runtime is shut down.");
     if (this.connection) { await this.connection.ready; return this.connection; }
     let connection: Connection | null = null; let finished!: () => void;
     const done = new Promise<void>(resolve => { finished = resolve; });

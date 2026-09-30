@@ -304,6 +304,40 @@ test("closing ends active turns, and resolves, only once Codex's processes have 
   assert.equal(runtime.halted, null);
 });
 
+test("several tasks' turns run at once on one connection, and closing it ends them all", async t => {
+  const { runtime, connections, conn, events } = setup(t);
+  const first = runtime.start(task(1), [], events); const second = runtime.start(task(2), [], events);
+  const third = runtime.resume(task(3, "th-9"), "follow up", [], events);
+  await flush();
+  assert.equal(connections.length, 1);
+  assert.deepEqual(conn().requests.filter(r => r.method === "turn/start").map(r => r.params.threadId).sort(), ["th-1", "th-2", "th-9"]);
+  const turnOf = (threadId: string) => {
+    const index = conn().requests.filter(r => r.method === "turn/start").findIndex(r => r.params.threadId === threadId);
+    return `tu-${index + 1}`;
+  };
+  conn().finish("th-2", turnOf("th-2"), outcome({ outcome: "completed", message: "Second.", evidence: ["x"] }));
+  assert.deepEqual(await second, { status: "completed", message: "Second.", evidence: ["x"] });
+  await runtime.close();
+  await assert.rejects(first, /disconnected/);
+  await assert.rejects(third, /disconnected/);
+});
+
+test("shutdown refuses a start still waiting for an earlier close, so no connection opens after it", async t => {
+  const { runtime, connections, conn, events } = setup(t);
+  const active = runtime.start(task(1), [], events); await flush();
+  conn().holdClose = true;
+  void runtime.close();
+  const waiting = runtime.start(task(2), [], events); await flush();
+  let stopped = false; const stopping = runtime.shutdown().then(() => { stopped = true; });
+  await flush();
+  assert.equal(stopped, false);
+  connections[0]!.finishClose();
+  await assert.rejects(active, /disconnected/); await stopping;
+  await assert.rejects(waiting, /shut down/);
+  await assert.rejects(runtime.resume(task(3, "th-3"), "again", [], events), /shut down/);
+  assert.equal(connections.length, 1);
+});
+
 test("a connection that fails to initialize is stopped before the start fails or the runtime counts as closed", async t => {
   const { runtime, connections, events, onConnect } = setup(t);
   onConnect(c => { c.failInitialize = true; c.holdClose = true; });

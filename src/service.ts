@@ -57,7 +57,9 @@ export async function runService(options: { config: Config; store: Store; transp
   const { config, store, transport, checkIdentity, signal, router, runtime } = options;
   const wait = options.wait ?? (async (ms, signal) => { await delay(ms, undefined, { signal }); });
   let caughtUp = false; let stopped = false; let failure: unknown;
-  let sending: Promise<void> | null = null; let routing: Promise<void> | null = null; let working: Promise<void> | null = null;
+  let sending: Promise<void> | null = null; let routing: Promise<void> | null = null;
+  // One entry per runTasks call that still has turns running; each poll may start more while free slots remain.
+  const working = new Set<Promise<void>>();
   const canDispatch = () => !stopped && !signal.aborted && caughtUp && !failure;
   const guarded: MessageTransport = {
     readiness: () => transport.readiness(), readAfter: (conversation, cursor) => transport.readAfter(conversation, cursor),
@@ -79,8 +81,8 @@ export async function runService(options: { config: Config; store: Store; transp
     },
   };
   const core = new Engine(config, store, guarded, { ...(options.plugins ? { plugins: options.plugins } : {}), ...(runtime ? { runtime } : {}) });
-  // Closing the runtime ends an active turn, which leaves its task interrupted until the contact continues it.
-  const stop = () => { stopped = true; transport.close(); return runtime?.close(); };
+  // Shutting the runtime down ends active turns, which leaves their tasks interrupted until the contact continues them.
+  const stop = () => { stopped = true; transport.close(); return runtime?.shutdown(); };
   signal.addEventListener("abort", stop, { once: true });
   try {
     store.recoverInFlight();
@@ -95,7 +97,10 @@ export async function runService(options: { config: Config; store: Store; transp
         sending ??= core.tick().catch(error => { failure = error; }).finally(() => { sending = null; });
         if (router || (runtime && config.runtime))
           routing ??= core.routeTasks(router ?? null, canDispatch).catch(error => { failure = error; }).finally(() => { routing = null; });
-        if (runtime && config.runtime) working ??= core.runTasks(canDispatch).catch(error => { failure = error; }).finally(() => { working = null; });
+        if (runtime && config.runtime) {
+          const run: Promise<void> = core.runTasks(canDispatch).catch(error => { failure = error; }).finally(() => { working.delete(run); });
+          working.add(run);
+        }
       }
       await wait(config.pollMs, signal);
     }
@@ -103,7 +108,7 @@ export async function runService(options: { config: Config; store: Store; transp
   finally {
     // The caller releases the service lock after this returns, so wait until the runtime's processes have exited.
     const closed = stop(); signal.removeEventListener("abort", stop);
-    await Promise.allSettled([sending, routing, working, closed]);
+    await Promise.allSettled([sending, routing, ...working, core.idle(), closed]);
     store.recoverInFlight();
   }
   // Even after a requested stop: the operator must check for Codex commands still running before Nori runs again.

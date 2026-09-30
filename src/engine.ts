@@ -1,5 +1,5 @@
 import type { ActionPlugin, Budget, OutboxItem, Clarification, Command, Config, Contact, IntentRouter, Message, MessagePage, MessageTransport,
-  RoutingDecision, Runtime, RuntimeEvents, SendOutcome, Task, TurnOutcome, WaitingFor } from "./contracts.js";
+  RoutingDecision, Runtime, RuntimeConfig, RuntimeEvents, SendOutcome, Task, TurnOutcome, WaitingFor } from "./contracts.js";
 import { normalizeHandle, record } from "./config.js";
 import { checkPlugins, isClarification, PluginHost, type DispatchSource } from "./host.js";
 import { inQuietHours, isCompound, localDay, parseEngineCommand, type EngineCommand } from "./parser.js";
@@ -42,6 +42,8 @@ export class Engine {
   private readonly clock: () => number;
   private readonly runtime: Runtime | null;
   private readonly active = new Map<number, ActiveTurn>();
+  /** Every started turn until it settles, including after its result was recorded, so shutdown can wait for all of them. */
+  private readonly turns = new Set<Promise<void>>();
   private deferred: Array<() => void> | null = null;
   private sending = false;
 
@@ -417,17 +419,38 @@ export class Engine {
   }
 
   /**
-   * Starts or resumes at most one runtime turn and resolves when it ends. Turns run one at a time; intake, timers, and
-   * engine commands stay responsive meanwhile.
+   * Starts or resumes routed tasks, oldest first, while fewer than `maxJobs` turns are running, and resolves when the
+   * turns it started have ended. It rejects as soon as one of them cannot record its result, without waiting for the
+   * others; `idle` waits for those. Safe to call again while turns run: later calls fill only the free slots. Intake,
+   * timers, and engine commands stay responsive meanwhile.
    */
   async runTasks(shouldContinue: () => boolean = () => true): Promise<void> {
-    const runtime = this.runtime; const limits = this.config.runtime;
-    if (!runtime || !limits || this.active.size || !shouldContinue() || runtime.halted) return;
+    const turns: Array<Promise<void>> = []; const tried = new Set<number>();
+    // Claiming is synchronous, so overlapping calls cannot start more than `maxJobs` turns or the same task twice.
+    while (this.runtime && this.config.runtime && this.active.size < this.config.runtime.maxJobs && shouldContinue() && !this.runtime.halted) {
+      const next = this.startTurn(this.runtime, this.config.runtime, tried);
+      if (next === null) break;
+      if (next !== "held") turns.push(next);
+    }
+    await Promise.all(turns);
+  }
+
+  /** Resolves once every turn started so far has ended, whether or not its result could be recorded. */
+  async idle(): Promise<void> {
+    while (this.turns.size) await Promise.allSettled(this.turns);
+  }
+
+  /**
+   * Claims the oldest routed task the limits allow and starts its turn. Returns the turn, which settles when it ends;
+   * "held" when a budget stopped the task before it started; or null when nothing more can start.
+   */
+  private startTurn(runtime: Runtime, limits: RuntimeConfig, tried: Set<number>): Promise<void> | "held" | null {
     const contacts = this.activeContacts().filter(c => this.runtimeFor(c));
     // The oldest job the daily limits allow: a new job blocked by the task limit does not hold up jobs resuming a thread.
-    const task = this.store.tasks().find(x => x.state === "routed" && contacts.some(c => c.id === x.contactId)
+    const task = this.store.tasks().find(x => x.state === "routed" && !tried.has(x.id) && contacts.some(c => c.id === x.contactId)
       && !this.dailyLimitReached(x.threadId === null));
-    if (!task) return;
+    if (!task) return null;
+    tried.add(task.id);
     const contact = contacts.find(c => c.id === task.contactId)!;
     const fresh = task.threadId === null;
     // Every budget is checked before a turn starts, so no reply can start work past a limit without `continue #n`.
@@ -439,7 +462,7 @@ export class Engine {
         if (this.store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "limit", limit: exhausted } }, ["routed"]))
           this.tell(contact, `task:${task.id}:limit:${exhausted}:${usage.turns}:${allowance}`, this.limitMessage(task.number, exhausted));
       });
-      return;
+      return "held";
     }
     // The input stays on the task until the runtime accepts the turn, so a failed start loses nothing. A retained first
     // request keeps its send time, which the runtime otherwise adds only when starting a thread.
@@ -451,16 +474,21 @@ export class Engine {
       claimed = this.store.updateTask(task.id, { state: "running", input: sent, usage: { turns: task.usage.turns + 1 } }, ["routed"]);
       if (claimed && fresh) this.store.addDaily("runtime-tasks", localDay(now, this.config.timezone), 1);
     });
-    if (!claimed) return;
+    if (!claimed) return "held";
     const turn: ActiveTurn = { taskId: task.id, since: now, approvals: new Map(), limit: null, gate: Promise.resolve(), sent, calls: new Map() };
     this.active.set(task.id, turn);
-    let outcome: TurnOutcome;
-    try {
-      const current = this.store.task(task.id)!; const tools = this.host.tools(contact); const events = this.events(current, contact, turn);
-      // Follow-ups sent before the first turn become part of the request.
-      outcome = fresh ? await runtime.start({ ...current, text: input }, tools, events) : await runtime.resume(current, input, tools, events);
-    } catch { outcome = { status: "interrupted" }; }
-    this.finishTurn(contact, turn, outcome);
+    const running = (async () => {
+      let outcome: TurnOutcome;
+      try {
+        const current = this.store.task(task.id)!; const tools = this.host.tools(contact); const events = this.events(current, contact, turn);
+        // Follow-ups sent before the first turn become part of the request.
+        outcome = fresh ? await runtime.start({ ...current, text: input }, tools, events) : await runtime.resume(current, input, tools, events);
+      } catch { outcome = { status: "interrupted" }; }
+      this.finishTurn(contact, turn, outcome);
+    })();
+    this.turns.add(running);
+    void running.catch(() => {}).finally(() => { this.turns.delete(running); });
+    return running;
   }
 
   private events(task: Task, contact: Contact, turn: ActiveTurn): RuntimeEvents {
