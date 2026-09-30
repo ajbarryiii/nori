@@ -1,0 +1,9 @@
+#!/bin/sh
+# Nori Astra review hook v1
+set -eu
+root=$(git rev-parse --show-toplevel)
+if [ ! -f "$root/scripts/review-pr.mjs" ]; then
+  echo 'Nori review runner is missing in this checkout. Switch to a branch with the review tooling before pushing.' >&2
+  exit 2
+fi
+exec node "$root/scripts/review-pr.mjs" --pre-push "$@"

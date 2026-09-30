@@ -1,0 +1,4 @@
+interface:
+  display_name: "Babysit Nori PR"
+  short_description: "Astra xHigh review with fixes by the original agent"
+  default_prompt: "Use $babysit-pr to review this Nori PR with Astra xHigh, fix verified findings, and monitor CI."

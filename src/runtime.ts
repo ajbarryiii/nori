@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Config } from "./contracts.js";
 
 export function acquireLock(dataDir: string): () => void {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
@@ -21,11 +20,11 @@ export function acquireLock(dataDir: string): () => void {
   };
 }
 
-export function databaseIdentity(config: Config, databasePath: string): string {
+/** Version 2 keys on the assistant account and Messages database. Conversations have their own enrollment records. */
+export function databaseIdentity(assistantUser: string, databasePath: string): string {
   const path = realpathSync(databasePath); const stat = statSync(path);
   if (!stat.isFile()) throw new Error("Messages database is not a regular file.");
-  return createHash("sha256").update(JSON.stringify({ version: 1, transport: "imsg", user: config.assistantUser,
-    owner: { ...config.owner, handles: [...config.owner.handles].sort() }, path,
+  return createHash("sha256").update(JSON.stringify({ version: 2, transport: "imsg", user: assistantUser, path,
     device: stat.dev, inode: stat.ino, birthtime: stat.birthtimeMs })).digest("hex");
 }
 export function assertIdentity(expected: string | null, actual: string): void {

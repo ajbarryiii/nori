@@ -9,6 +9,9 @@
   },
   "scripts": {
     "test": "node --import tsx --test test/*.test.ts",
+    "test:review": "node --test scripts/test/*.test.mjs",
+    "review": "node scripts/review-pr.mjs",
+    "review:install": "node scripts/install-review-hook.mjs",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "dev": "node --import tsx src/cli.ts",

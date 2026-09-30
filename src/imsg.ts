@@ -1,4 +1,4 @@
-import type { Message, MessagePage, MessageTransport, Owner, RpcPort, SendOutcome } from "./contracts.js";
+import type { Conversation, Message, MessagePage, MessageTransport, RpcPort, SendOutcome } from "./contracts.js";
 import { object as record } from "./config.js";
 import { RpcError } from "./rpc.js";
 import { Temporal } from "@js-temporal/polyfill";
@@ -15,8 +15,15 @@ export function decodeMessage(value: unknown): Message | null {
     sender: row.sender, isFromMe: row.is_from_me, isGroup: row.is_group, text: row.text, sentAt };
 }
 
+/** Reads and sends only in the configured direct conversations. */
 export class ImessageTransport implements MessageTransport {
-  constructor(private readonly rpc: RpcPort, private readonly owner: Owner) {}
+  private readonly conversations: readonly Conversation[];
+  constructor(private readonly rpc: RpcPort, conversations: readonly Conversation[]) {
+    this.conversations = conversations.map(c => ({ ...c }));
+  }
+  private configured(target: Conversation): boolean {
+    return this.conversations.some(c => c.chatId === target.chatId && c.chatGuid === target.chatGuid);
+  }
   async readiness(): Promise<{ ready: boolean; detail: string }> {
     const status = record(await this.rpc.request("status", {}));
     const database = record(status?.database);
@@ -24,8 +31,9 @@ export class ImessageTransport implements MessageTransport {
     const ready = database?.ready === true && Array.isArray(methods) && ["messages.after", "send", "messages.history"].every(m => methods.includes(m));
     return { ready, detail: ready ? "Messages database and required RPC methods are available." : "imsg needs database access and status/messages.after/messages.history/send support." };
   }
-  async readAfter(cursor: number): Promise<MessagePage> {
-    const response = record(await this.rpc.request("messages.after", { since_rowid: cursor, chat_id: this.owner.chatId, limit: 100, attachments: false }));
+  async readAfter(conversation: Conversation, cursor: number): Promise<MessagePage> {
+    if (!this.configured(conversation)) throw new Error("Refusing to read a conversation that is not configured.");
+    const response = record(await this.rpc.request("messages.after", { since_rowid: cursor, chat_id: conversation.chatId, limit: 100, attachments: false }));
     if (!response || !Array.isArray(response.messages) || !Number.isSafeInteger(response.next_rowid)
       || Number(response.next_rowid) < cursor || typeof response.has_more !== "boolean"
       || (response.has_more && Number(response.next_rowid) === cursor)) throw new Error("Invalid imsg catch-up cursor.");
@@ -34,9 +42,10 @@ export class ImessageTransport implements MessageTransport {
     if (messages.some(m => m.rowId > nextCursor)) throw new Error("imsg returned a message beyond its scan cursor.");
     return { messages, nextCursor, hasMore: response.has_more };
   }
-  async send(text: string): Promise<SendOutcome> {
+  async send(target: Conversation, text: string): Promise<SendOutcome> {
+    if (!this.configured(target)) return { status: "not_started", reason: "Target is not a configured conversation" };
     try {
-      const response = record(await this.rpc.request("send", { chat_guid: this.owner.chatGuid, text,
+      const response = record(await this.rpc.request("send", { chat_guid: target.chatGuid, text,
         transport: "applescript", allow_sms_fallback: false }));
       if (response?.ok === true && typeof response.guid === "string" && response.guid.trim())
         return { status: "sent", messageGuid: response.guid };
