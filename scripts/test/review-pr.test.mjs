@@ -217,6 +217,28 @@ exit 0
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 });
+test('a tagged process seen in only one of the two listings is stopped', async t => {
+  const f = fixture(t);
+  const ps = join(f.root, '.git', 'test-bin', 'ps'); const child = join(f.root, '.git', 'codex-calls.jsonl.child');
+  // The process listing never shows the worker; the environment listing shows it, tagged, while it runs.
+  writeFileSync(ps, `#!/bin/sh
+out=$(/bin/ps "$@") || exit $?
+pid=$(cat '${child}' 2>/dev/null)
+case " $* " in
+  *" -E "*) printf '%s\\n' "$out"
+    tag=$(printf '%s\\n' "$out" | grep -o 'NORI_PROCESS_TAG=[0-9a-f][0-9a-f-]*' | head -1)
+    [ -n "$pid" ] && [ -n "$tag" ] && kill -0 "$pid" 2>/dev/null && echo "$pid late $tag";;
+  *) if [ -n "$pid" ]; then printf '%s\\n' "$out" | grep -v "^ *$pid "; else printf '%s\\n' "$out"; fi;;
+esac
+exit 0
+`); chmodSync(ps, 0o755);
+  const r = f.run([], { FAKE_MODE: 'late', NORI_REVIEW_TIMEOUT_SECONDS: '1' });
+  assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /timed out/i); assert.doesNotMatch(r.stderr, /confirmed/);
+  const pid = Number(readFileSync(child, 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+});
 test('a timeout whose processes cannot be confirmed stopped keeps the review lock', async t => {
   const f = fixture(t);
   const ps = join(f.root, '.git', 'test-bin', 'ps'); writeFileSync(ps, '#!/bin/sh\nexit 1\n'); chmodSync(ps, 0o755);

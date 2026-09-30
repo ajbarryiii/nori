@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { test } from "node:test";
 import { resolve } from "node:path";
 import { parseConfig, requireAssistantUser } from "../src/config.js";
-import { StdioRpc, type ProcessTable } from "../src/rpc.js";
+import { parseListings, StdioRpc, type ProcessTable } from "../src/rpc.js";
 
 const contact = { id: "owner", name: "Owner", handles: ["Owner@Example.com"], role: "owner", plugins: ["reminders"],
   conversation: { chatId: 42, chatGuid: "iMessage;-;owner@example.com" } };
@@ -175,6 +175,16 @@ test("a process that is first seen while the others are being killed is stopped 
   rpc.close();
   assert.equal(await closed, true);
   assert.equal(running(late.pid!), false);
+});
+
+test("a tagged process missing from the separate process listing is kept, with nothing else known about it", () => {
+  const processes = "  100     1   100 Ss   Wed Sep 30 10:00:00 2026\n  200   100   100 S    Wed Sep 30 10:00:01 2026\n";
+  const environments = "  100 /usr/bin/app A=1\n  200 node worker.js NORI_PROCESS_TAG=abc B=2\n  300 node late.js NORI_PROCESS_TAG=abc\n  400 other NORI_PROCESS_TAG=xyz\n";
+  assert.deepEqual([...parseListings(processes, environments, "abc")], [
+    [100, { parent: 1, group: 100, start: "Wed Sep 30 10:00:00 2026", exited: false, tagged: false }],
+    [200, { parent: 100, group: 100, start: "Wed Sep 30 10:00:01 2026", exited: false, tagged: true }],
+    [300, { parent: 0, group: null, start: null, exited: false, tagged: true }],
+  ]);
 });
 
 test("a stop that cannot be confirmed is reported as unconfirmed", async t => {

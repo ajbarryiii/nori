@@ -13,26 +13,34 @@ export const PROCESS_TAG = "NORI_PROCESS_TAG";
 
 /**
  * Every process's parent, process group, and start time, and whether its environment carries `tag`. The start time keeps
- * a reused process id from being mistaken for another. macOS hides the environment of its own system binaries.
+ * a reused process id from being mistaken for another. macOS hides the environment of its own system binaries. The two
+ * listings are not taken at the same instant: a tagged process missing from the process listing is kept, with no parent,
+ * group, or start time, so cleanup looks again rather than missing it.
  */
-export type ProcessTable = Map<number, { parent: number; group: number; start: string; exited: boolean; tagged: boolean }>;
+export type ProcessTable = Map<number, { parent: number; group: number | null; start: string | null; exited: boolean; tagged: boolean }>;
 
-async function processTable(tag: string): Promise<ProcessTable> {
-  const [{ stdout }, { stdout: environments }] = await Promise.all([
-    run("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="], { maxBuffer: 16 * 1_048_576 }),
-    run("/bin/ps", ["-A", "-E", "-ww", "-o", "pid=,command="], { maxBuffer: 256 * 1_048_576 })]);
+/** Builds the table from `ps -o pid=,ppid=,pgid=,stat=,lstart=` and `ps -E -o pid=,command=` output. */
+export function parseListings(processes: string, environments: string, tag: string): ProcessTable {
   const marker = `${PROCESS_TAG}=${tag}`; const tagged = new Set<number>();
   for (const line of environments.split("\n")) {
     const pid = /^\s*(\d+)\s/.exec(line)?.[1];
     if (pid && line.includes(marker)) tagged.add(Number(pid));
   }
   const table: ProcessTable = new Map();
-  for (const line of stdout.split("\n")) {
+  for (const line of processes.split("\n")) {
     const row = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
     if (row) table.set(Number(row[1]), { parent: Number(row[2]), group: Number(row[3]), exited: row[4]!.startsWith("Z"), start: row[5]!,
       tagged: tagged.has(Number(row[1])) });
   }
+  for (const pid of tagged) if (!table.has(pid)) table.set(pid, { parent: 0, group: null, start: null, exited: false, tagged: true });
   return table;
+}
+
+async function processTable(tag: string): Promise<ProcessTable> {
+  const [{ stdout }, { stdout: environments }] = await Promise.all([
+    run("/bin/ps", ["-A", "-o", "pid=,ppid=,pgid=,stat=,lstart="], { maxBuffer: 16 * 1_048_576 }),
+    run("/bin/ps", ["-A", "-E", "-ww", "-o", "pid=,command="], { maxBuffer: 256 * 1_048_576 })]);
+  return parseListings(stdout, environments, tag);
 }
 
 /**
@@ -45,12 +53,12 @@ async function processTable(tag: string): Promise<ProcessTable> {
  */
 async function killTree(root: number, uncollected: () => boolean, list: () => Promise<ProcessTable>): Promise<boolean> {
   if (uncollected()) signal(root, "SIGSTOP");
-  const found = new Map<number, string>();
+  const found = new Map<number, string | null>();
   try { return await freezeAndKill(root, uncollected, list, found); }
   catch { for (const pid of found.keys()) if (pid !== root || uncollected()) signal(pid, "SIGKILL"); return false; }
 }
 
-async function freezeAndKill(root: number, uncollected: () => boolean, list: () => Promise<ProcessTable>, found: Map<number, string>):
+async function freezeAndKill(root: number, uncollected: () => boolean, list: () => Promise<ProcessTable>, found: Map<number, string | null>):
   Promise<boolean> {
   for (let round = 0; round < 50; round++) if (!discover(await list(), root, uncollected, found)) break;
   // A process can appear between listings, so every listing is searched again while killing. Stopped means a listing
@@ -58,8 +66,11 @@ async function freezeAndKill(root: number, uncollected: () => boolean, list: () 
   for (let round = 0; round < 40; round++) {
     const table = await list();
     const added = discover(table, root, uncollected, found);
-    for (const [pid, start] of found) {
+    for (const [pid, seen] of found) {
       const entry = table.get(pid);
+      // One first seen only in the environment listing gets its start time once the process listing shows it.
+      const start = seen ?? entry?.start ?? null;
+      if (start !== seen) found.set(pid, start);
       if (!entry || entry.start !== start || entry.exited || (pid === root && !uncollected())) found.delete(pid);
       else signal(pid, "SIGKILL");
     }
@@ -74,23 +85,26 @@ async function freezeAndKill(root: number, uncollected: () => boolean, list: () 
  * children of processes found, tagged processes, and members of a found process's group other than this process's own.
  * Returns whether any was added.
  */
-function discover(table: ProcessTable, root: number, uncollected: () => boolean, found: Map<number, string>): boolean {
+function discover(table: ProcessTable, root: number, uncollected: () => boolean, found: Map<number, string | null>): boolean {
   const rootEntry = table.get(root);
   if (!uncollected()) found.delete(root);
   else if (rootEntry && !rootEntry.exited && !found.has(root)) found.set(root, rootEntry.start);
   const own = table.get(process.pid)?.group;
   // Groups of processes found in this listing, so a group id reused after its members exited is never matched.
   const groups = new Set<number>();
-  for (const [pid, start] of found) { const entry = table.get(pid); if (entry?.start === start && entry.group !== own) groups.add(entry.group); }
+  for (const [pid, start] of found) {
+    const entry = table.get(pid);
+    if (entry?.start === start && entry.group !== null && entry.group !== own) groups.add(entry.group);
+  }
   let added = false; let grew = true;
   while (grew) {
     grew = false;
     for (const [pid, entry] of table) {
       if (found.has(pid) || pid === process.pid || entry.exited) continue;
       const child = found.has(entry.parent) && table.get(entry.parent)?.start === found.get(entry.parent);
-      if (!child && !entry.tagged && !groups.has(entry.group)) continue;
+      if (!child && !entry.tagged && (entry.group === null || !groups.has(entry.group))) continue;
       signal(pid, "SIGSTOP"); found.set(pid, entry.start); added = grew = true;
-      if (entry.group !== own) groups.add(entry.group);
+      if (entry.group !== null && entry.group !== own) groups.add(entry.group);
     }
   }
   return added;

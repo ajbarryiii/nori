@@ -89,7 +89,12 @@ async function processTable(tag) {
     if (row) table.set(Number(row[1]), { parent: Number(row[2]), group: Number(row[3]), exited: row[4].startsWith('Z'), start: row[5], tagged: false });
   }
   // A process that started after the first listing is picked up in the next one.
-  for (const pid of await tagged(tag, [...table.keys()])) { const entry = table.get(pid); if (entry) entry.tagged = true; }
+  // The listings are not taken at the same instant: a tagged process missing from the first is kept, with nothing else
+  // known about it, so cleanup looks again rather than missing it.
+  for (const pid of await tagged(tag, [...table.keys()])) {
+    const entry = table.get(pid);
+    if (entry) entry.tagged = true; else table.set(pid, { parent: 0, group: null, start: null, exited: false, tagged: true });
+  }
   return table;
 }
 /**
@@ -109,8 +114,11 @@ async function stopTree(root, uncollected, tag) {
     for (let round = 0; round < 40; round++) {
       const table = await processTable(tag);
       const added = discover(table, root, uncollected, found);
-      for (const [pid, start] of found) {
+      for (const [pid, seen] of found) {
         const entry = table.get(pid);
+        // One first seen only in the environment listing gets its start time once the process listing shows it.
+        const start = seen ?? entry?.start ?? null;
+        if (start !== seen) found.set(pid, start);
         if (!entry || entry.start !== start || entry.exited || (pid === root && !uncollected())) found.delete(pid);
         else signal(pid, 'SIGKILL');
       }
@@ -134,16 +142,19 @@ function discover(table, root, uncollected, found) {
   const own = table.get(process.pid)?.group;
   // Groups of processes found in this listing, so a group id reused after its members exited is never matched.
   const groups = new Set();
-  for (const [pid, start] of found) { const entry = table.get(pid); if (entry?.start === start && entry.group !== own) groups.add(entry.group); }
+  for (const [pid, start] of found) {
+    const entry = table.get(pid);
+    if (entry?.start === start && entry.group !== null && entry.group !== own) groups.add(entry.group);
+  }
   let added = false; let grew = true;
   while (grew) {
     grew = false;
     for (const [pid, entry] of table) {
       if (found.has(pid) || pid === process.pid || entry.exited) continue;
       const child = found.has(entry.parent) && table.get(entry.parent)?.start === found.get(entry.parent);
-      if (!child && !entry.tagged && !groups.has(entry.group)) continue;
+      if (!child && !entry.tagged && (entry.group === null || !groups.has(entry.group))) continue;
       signal(pid, 'SIGSTOP'); found.set(pid, entry.start); added = grew = true;
-      if (entry.group !== own) groups.add(entry.group);
+      if (entry.group !== null && entry.group !== own) groups.add(entry.group);
     }
   }
   return added;
