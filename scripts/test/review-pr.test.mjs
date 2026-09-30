@@ -171,6 +171,22 @@ test('timeout terminates processes left behind by commands that have exited', as
   t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 });
+test('a process that appears between listings does not fail cleanup', async t => {
+  const f = fixture(t);
+  // The environment listing reports a tagged process the other listing never saw.
+  const ps = join(f.root, '.git', 'test-bin', 'ps');
+  writeFileSync(ps, `#!/bin/sh
+out=$(/bin/ps "$@") || exit $?
+printf '%s\\n' "$out"
+case " $* " in *" -E "*) tag=$(printf '%s\\n' "$out" | grep -o 'NORI_PROCESS_TAG=[0-9a-f][0-9a-f-]*' | head -1); [ -n "$tag" ] && echo "99999999 /bin/phantom $tag";; esac
+exit 0
+`); chmodSync(ps, 0o755);
+  const r = f.run([], { FAKE_MODE: 'session', NORI_REVIEW_TIMEOUT_SECONDS: '1' });
+  assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /timed out/i); assert.doesNotMatch(r.stderr, /confirmed/);
+  const pid = Number(readFileSync(join(f.root, '.git/codex-calls.jsonl.child'), 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+});
 test('a timeout whose processes cannot be confirmed stopped keeps the review lock', async t => {
   const f = fixture(t);
   const ps = join(f.root, '.git', 'test-bin', 'ps'); writeFileSync(ps, '#!/bin/sh\nexit 1\n'); chmodSync(ps, 0o755);

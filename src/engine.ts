@@ -495,7 +495,7 @@ export class Engine {
           this.store.updateTask(task.id, { usage: { tokens: total } });
           this.store.addDaily("runtime-tokens", localDay(this.clock(), this.config.timezone), delta);
         });
-        if (total > limits.budget.tokens * current.usage.allowance) this.interrupt(turn, { kind: "limit", limit: "tokens" });
+        if (total >= limits.budget.tokens * current.usage.allowance) this.interrupt(turn, { kind: "limit", limit: "tokens" });
       },
     };
   }

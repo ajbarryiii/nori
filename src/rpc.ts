@@ -115,6 +115,8 @@ export class StdioRpc implements RpcPort {
     this.child.stdin.on("error", () => this.close());
     this.child.on("error", () => this.close());
     this.child.on("close", () => this.close());
+    // `close` waits for the output pipes, which something the server started may hold open after it exits.
+    this.child.on("exit", () => this.close());
   }
   private write(value: Record<string, unknown>): void {
     if (this.closed) throw new Error("RPC connection closed.");

@@ -6,6 +6,11 @@ createInterface({ input: process.stdin }).on('line', line => {
   const m = JSON.parse(line);
   if (m.method === 'orphans') { orphans(m.id); return; }
   if (m.method === 'exit') process.exit(0);
+  if (m.method === 'holder') {
+    // A detached process that keeps the server's output pipe open after the server exits.
+    const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 300000)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });
+    holder.unref(); send({ id: m.id, result: holder.pid }); return;
+  }
   if (m.method !== 'spawn') return;
   const session = spawn('/bin/sh', ['-c', 'sleep 300 & echo $!; wait'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
   const plain = spawn('/bin/sleep', ['301'], { stdio: 'ignore' });

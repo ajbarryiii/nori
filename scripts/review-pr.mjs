@@ -88,7 +88,8 @@ async function processTable(tag) {
     const row = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S.*?)\s*$/.exec(line);
     if (row) table.set(Number(row[1]), { parent: Number(row[2]), group: Number(row[3]), exited: row[4].startsWith('Z'), start: row[5], tagged: false });
   }
-  for (const pid of await tagged(tag, [...table.keys()])) table.get(pid).tagged = true;
+  // A process that started after the first listing is picked up in the next one.
+  for (const pid of await tagged(tag, [...table.keys()])) { const entry = table.get(pid); if (entry) entry.tagged = true; }
   return table;
 }
 /**

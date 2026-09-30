@@ -777,6 +777,21 @@ test("reaching the token limit exactly still requires continue", async t => {
   assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "tokens" });
 });
 
+test("a running turn is stopped as soon as its tokens reach the budget", async t => {
+  const { engine, store, runtime, texts } = setup(t);
+  engine.acceptPage("owner", page([message("organize everything")]));
+  await engine.routeTasks(null);
+  const turn = held(runtime);
+  const { done: run } = await started(engine);
+  turn.events().usage(1000);
+  assert.equal(await turn.events().approval({ operation: "run a command", detail: "ls" }), false);
+  await run;
+  assert.deepEqual(runtime.cancelled, [store.tasks()[0]!.id]);
+  assert.deepEqual(store.tasks()[0]?.waitingFor, { kind: "limit", limit: "tokens" });
+  assert.equal(store.approvals().length, 0);
+  assert.ok(!texts().some(text => /needs your OK/.test(text)));
+});
+
 test("only a message sent after the question was delivered answers it", async t => {
   const { engine, store, runtime, advance } = setup(t);
   engine.acceptPage("owner", page([message("research a laptop")]));

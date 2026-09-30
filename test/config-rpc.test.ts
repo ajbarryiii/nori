@@ -143,6 +143,17 @@ test("after the server exits on its own, closing still stops what it left behind
   assert.deepEqual(pids.map(running), [false, false, false]);
 });
 
+test("a server that exits closes the connection even while something it started holds its output", async t => {
+  let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
+  const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,
+    handlers: { closed: stopped => reported(stopped) } });
+  const pid = await rpc.request("holder", {}) as number;
+  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ } });
+  await assert.rejects(rpc.request("exit", {}), /closed/);
+  assert.equal(await closed, true);
+  assert.equal(running(pid), false);
+});
+
 test("a stop that cannot be confirmed is reported as unconfirmed", async t => {
   let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
   const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,
