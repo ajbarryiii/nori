@@ -220,6 +220,12 @@ test('a push to main compares the remote old commit even when origin/main alread
   const r = f.run(['--pre-push', 'origin', 'unused'], {}, `refs/heads/main ${f.head} refs/heads/main ${f.base}\n`);
   assert.equal(r.status, 0, r.stderr); assert.equal(f.calls().length, 1); assert.ok(f.calls()[0].prompt.includes(f.base));
 });
+test('replacement objects cannot make a changed push look unchanged', t => {
+  const f = fixture(t); git(f.root, 'replace', f.head, f.base);
+  const r = f.run(['--pre-push', 'origin', 'unused'], {}, `refs/heads/main ${f.head} refs/heads/main ${f.base}\n`);
+  assert.equal(r.status, 0, r.stderr); assert.equal(f.calls().length, 1);
+  assert.equal(f.calls()[0].source, 'export const value = 2;\n');
+});
 test('deletion and empty diffs skip model calls', t => {
   const f = fixture(t); const zero = '0'.repeat(40);
   assert.equal(f.run(['--pre-push', 'origin', 'unused'], {}, `(delete) ${zero} refs/heads/old ${f.head}\n`).status, 0);

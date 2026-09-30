@@ -5,6 +5,7 @@ const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 createInterface({ input: process.stdin }).on('line', line => {
   const m = JSON.parse(line);
   if (m.method === 'orphans') { orphans(m.id); return; }
+  if (m.method === 'exit') process.exit(0);
   if (m.method !== 'spawn') return;
   const session = spawn('/bin/sh', ['-c', 'sleep 300 & echo $!; wait'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
   const plain = spawn('/bin/sleep', ['301'], { stdio: 'ignore' });

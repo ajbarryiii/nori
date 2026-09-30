@@ -85,13 +85,15 @@ test("stdio RPC answers server requests through its handler and delivers notific
 });
 
 test("stdio RPC can pass the child an explicit environment and reports when it closes", async t => {
-  let closed = 0;
+  let closed = 0; let reported!: () => void; const report = new Promise<void>(resolve => { reported = resolve; });
   const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-child.mjs")], timeoutMs: 500,
-    env: { PATH: process.env.PATH ?? "", NORI_TEST: "1" }, handlers: { closed: () => { closed++; } } });
+    env: { PATH: process.env.PATH ?? "", NORI_TEST: "1" }, handlers: { closed: () => { closed++; reported(); } } });
   t.after(() => rpc.close());
   const keys = await rpc.request("env", {}) as string[];
   assert.ok(keys.includes("NORI_TEST")); assert.ok(!keys.includes("HOME"));
   await assert.rejects(rpc.request("exit", {}), /closed/);
+  // Reported once what the server left behind has been checked.
+  await report; rpc.close();
   assert.equal(closed, 1);
 });
 
@@ -126,6 +128,17 @@ test("closing also stops processes left behind by commands that have exited", as
   const parents = pids.map(pid => Number(execFileSync("/bin/ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" }).trim()));
   assert.deepEqual(parents, [1, 1, 1]);
   rpc.close();
+  assert.equal(await closed, true);
+  assert.deepEqual(pids.map(running), [false, false, false]);
+});
+
+test("after the server exits on its own, closing still stops what it left behind", async t => {
+  let reported!: (stopped: boolean) => void; const closed = new Promise<boolean>(resolve => { reported = resolve; });
+  const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-tree.mjs")], timeoutMs: 5000,
+    handlers: { closed: stopped => reported(stopped) } });
+  const pids = await rpc.request("orphans", {}) as number[];
+  t.after(() => { for (const pid of pids) { try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ } } });
+  await assert.rejects(rpc.request("exit", {}), /closed/);
   assert.equal(await closed, true);
   assert.deepEqual(pids.map(running), [false, false, false]);
 });

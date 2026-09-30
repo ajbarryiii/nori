@@ -23,6 +23,8 @@ function cleanGitEnvironment() {
   if (result.status !== 0) throw new Error('Cannot determine Git hook environment.');
   const env = { ...process.env };
   for (const name of result.stdout.trim().split('\n')) delete env[name];
+  // A push transfers real objects, so replacements must not change what is compared, snapshotted, or reviewed.
+  env.GIT_NO_REPLACE_OBJECTS = '1';
   return env;
 }
 

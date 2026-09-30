@@ -44,8 +44,7 @@ async function processTable(tag: string): Promise<ProcessTable> {
  * found was confirmed stopped; if the processes cannot be listed, those already found are killed and it returns false.
  */
 async function killTree(root: number, uncollected: () => boolean, list: () => Promise<ProcessTable>): Promise<boolean> {
-  if (!uncollected()) return true;
-  signal(root, "SIGSTOP");
+  if (uncollected()) signal(root, "SIGSTOP");
   const found = new Map<number, string>();
   try { return await freezeAndKill(root, uncollected, list, found); }
   catch { for (const pid of found.keys()) if (pid !== root || uncollected()) signal(pid, "SIGKILL"); return false; }
@@ -175,8 +174,8 @@ export class StdioRpc implements RpcPort {
   /**
    * Rejects pending requests, then stops the server and every process it started, including ones in their own
    * sessions (Codex runs commands that way), and reports `closed` once they have exited, or once it is clear that
-   * cannot be confirmed. Processes are found through the running server: a server that already exited leaves nothing
-   * to trace.
+   * cannot be confirmed. Processes are found through the running server, and by the tag and process groups of what it
+   * started, so a server that already exited still has what it left behind stopped.
    */
   close(): void {
     if (this.closed) return;
@@ -185,7 +184,8 @@ export class StdioRpc implements RpcPort {
     this.pending.clear(); this.child.stdin.destroy();
     const report = (stopped: boolean) => { try { this.options.handlers?.closed?.(stopped); } catch { /* Closing never throws. */ } };
     const pid = this.child.pid; const uncollected = () => this.child.exitCode === null && this.child.signalCode === null;
-    if (pid === undefined || !uncollected()) { report(true); return; }
+    if (pid === undefined) { report(true); return; }
+    // Even after the server has exited, what it left behind is still found by its tag and process groups.
     const list = this.options.processTable ?? processTable;
     void killTree(pid, uncollected, () => list(this.tag)).then(async stopped => {
       this.child.kill("SIGKILL");
