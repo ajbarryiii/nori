@@ -262,7 +262,8 @@ export interface ActionPlugin {
   match(text: string, ctx: MessageContext): Command | Clarification | null;
   /**
    * Natural-language step after a Jev route. It may await a parser or `ctx.extract`; its context is read-only. Null means
-   * it could not read the message, and the engine falls back to model-free handling.
+   * it could not read the message, and the engine falls back to model-free handling. Commands should name their targets
+   * (such as a reminder number) so they cannot change meaning between verification and commit.
    */
   interpret?(text: string, ctx: PluginContext): Promise<Command | Clarification | null>;
   /**
@@ -540,13 +541,16 @@ export interface Judge {
   claimsAction(reply: string, committed: string | null, signal: AbortSignal): Promise<number | null>;
 }
 
-/** A committed reply a model may rephrase. Code decides what it must keep. */
+/**
+ * A committed reply a model may rephrase. Code decides what it must keep. Questions are never drafts: they are sent exactly
+ * as code wrote them, because a contact's "yes" must confirm what code will do.
+ */
 export interface Draft {
   /**
    * `result`: the reply to a committed command, which is also the account of what was done. `answer`: information,
-   * nothing changed. `question`: one question, nothing changed. `chat`: no template facts, nothing changed.
+   * nothing changed. `chat`: no template facts, nothing changed.
    */
-  kind: "result" | "answer" | "question" | "chat";
+  kind: "result" | "answer" | "chat";
   template: string;
   /** Instants the reply must state with their day and clock time. */
   times: number[];

@@ -57,7 +57,9 @@ export async function runService(options: { config: Config; store: Store; transp
   const { config, store, transport, checkIdentity, signal, router, runtime, conversation } = options;
   const wait = options.wait ?? (async (ms, signal) => { await delay(ms, undefined, { signal }); });
   let caughtUp = false; let stopped = false; let failure: unknown;
-  let sending: Promise<void> | null = null; let routing: Promise<void> | null = null; let understanding: Promise<void> | null = null;
+  let sending: Promise<void> | null = null; let routing: Promise<void> | null = null;
+  // Drains started by each poll. The engine skips contacts already draining, so a slow model call holds only its own contact.
+  const understanding = new Set<Promise<void>>();
   // Model calls stop on shutdown and on any failure, not only on the external signal.
   const work = new AbortController();
   const fail = (error: unknown) => { failure ??= error; work.abort(); };
@@ -101,8 +103,9 @@ export async function runService(options: { config: Config; store: Store; transp
       core.maintain();
       if (caughtUp && !signal.aborted && !failure) {
         // Pending messages drain in order; model calls see the service's signal so shutdown and failures abort them.
-        understanding ??= core.processPending(canWork, work.signal).catch(fail)
-          .finally(() => { understanding = null; if (canDispatch()) startSending(); });
+        const drain: Promise<void> = core.processPending(canWork, work.signal).catch(fail)
+          .finally(() => { understanding.delete(drain); if (canDispatch()) startSending(); });
+        understanding.add(drain);
         startSending();
         if (router || (runtime && config.runtime))
           routing ??= core.routeTasks(router ?? null, canDispatch).catch(fail).finally(() => { routing = null; });
@@ -117,7 +120,7 @@ export async function runService(options: { config: Config; store: Store; transp
   finally {
     // The caller releases the service lock after this returns, so wait until the runtime's processes have exited.
     const closed = stop(); signal.removeEventListener("abort", stop);
-    await Promise.allSettled([sending, routing, understanding, ...working, core.idle(), closed]);
+    await Promise.allSettled([sending, routing, ...understanding, ...working, core.idle(), closed]);
     // A send started as understanding finished may still be in flight.
     await Promise.allSettled([sending]);
     store.recoverInFlight();

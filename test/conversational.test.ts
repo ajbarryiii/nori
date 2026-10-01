@@ -14,7 +14,7 @@ import { config, enroll, epoch, FakeTransport, jevConfig, member, message, messa
 
 type Answer<T> = T | ((context: TurnContext, signal: AbortSignal) => Promise<T>);
 class FakeConversation implements ConversationPort {
-  understandings: Array<Answer<Understanding | null>> = []; faith: Array<number | null> = [];
+  understandings: Array<Answer<Understanding | null>> = []; faith: Array<Answer<number | null>> = [];
   extractions: unknown[] = []; phrases: Array<Answer<string | null>> = [];
   understood: TurnContext[] = []; proposals: string[] = []; extracts: ExtractRequest[] = []; drafts: Draft[] = []; signals: AbortSignal[] = [];
   async understand(context: TurnContext, signal: AbortSignal) {
@@ -22,7 +22,11 @@ class FakeConversation implements ConversationPort {
     const next = this.understandings.shift();
     return typeof next === "function" ? next(context, signal) : next ?? null;
   }
-  async faithful(_context: TurnContext, proposed: string) { this.proposals.push(proposed); return this.faith.length ? this.faith.shift()! : 0.95; }
+  async faithful(context: TurnContext, proposed: string, signal: AbortSignal) {
+    this.proposals.push(proposed);
+    const next = this.faith.length ? this.faith.shift()! : 0.95;
+    return typeof next === "function" ? next(context, signal) : next;
+  }
   async extract(_context: TurnContext, request: ExtractRequest) { this.extracts.push(request); return this.extractions.shift() ?? null; }
   async phrase(draft: Draft, context: TurnContext, signal: AbortSignal) {
     this.drafts.push(draft);
@@ -88,7 +92,7 @@ test("a grammar clarification goes to understanding instead of asking for a whol
   assert.equal(store.outbox().length, 0);
   await engine.processPending();
   assert.deepEqual(texts(store), ["When should I remind you?"]);
-  assert.equal(conversation.drafts[0]?.kind, "question");
+  assert.deepEqual([conversation.drafts.length, store.outbox()[0]?.status], [0, "pending"], "questions are sent as code wrote them");
   assert.equal(reminders(store).length, 0);
 });
 
@@ -246,7 +250,7 @@ test("chat, unclear, and unsure messages change nothing and get one reply", asyn
   assert.deepEqual(texts(store), ["Morning! Hope today's gentle on you.",
     "I'm not sure what you'd like me to do. Could you say it another way?",
     "Do you want me to save or change a reminder, or pause reminder messages?"]);
-  assert.deepEqual(conversation.drafts.map(x => x.kind), ["chat", "question", "question"]);
+  assert.deepEqual(conversation.drafts.map(x => x.kind), ["chat"]);
   assert.deepEqual([store.tasks().length, reminders(store).length, store.setting("pause:owner")], [0, 0, null]);
 });
 
@@ -259,6 +263,7 @@ test("every change needs the agreement check; a failed or unavailable check asks
     await engine.processPending();
     assert.equal(store.setting("pause:owner"), null);
     assert.deepEqual(texts(store), ["Did you mean: pause all reminder messages until you say resume? Say yes, or tell me what to change."]);
+    assert.equal(conversation.drafts.length, 0, "a confirmation is never rephrased");
   }
   const { engine, store, conversation } = setup(t);
   conversation.understandings.push(understood("reminders"));
@@ -419,4 +424,69 @@ test("a failure-triggered stop aborts in-flight understanding and keeps the mess
   assert.equal(seen?.aborted, true);
   assert.equal(store.hasPendingMessages("owner"), true);
   assert.equal(store.tasks().length, 0); assert.equal(conversation.drafts.length, 0);
+});
+
+test("explicit compound markers keep a message whole as a job, whatever Jev says", async t => {
+  const { engine, store, conversation } = setup(t);
+  conversation.understandings.push(understood("reminders", 0.99));
+  engine.acceptPage("owner", page([message("remind me to call mom in an hour; add eggs to my list")]));
+  await engine.processPending();
+  assert.deepEqual([reminders(store).length, conversation.extracts.length], [0, 0]);
+  assert.deepEqual(store.tasks().map(x => x.text), ["remind me to call mom in an hour; add eggs to my list"]);
+});
+
+test("a change whose account shifts before commit is not made, and the contact is asked again", async t => {
+  const { engine, store, conversation } = setup(t);
+  engine.acceptPage("owner", page([message("note stretch")]));
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ action: "snooze", task_id: 1, snooze_minutes: 20 }));
+  conversation.faith.push(async () => {
+    store.stateSet("reminders", "owner", "reminder:1", { ...reminders(store)[0]!, title: "stretch again" });
+    return 0.95;
+  });
+  engine.acceptPage("owner", page([message("push that back a bit", 2)]));
+  await engine.processPending();
+  assert.equal(reminders(store)[0]?.nextAt, null);
+  assert.equal(texts(store).at(-1), "Something changed while I was checking that, so I haven't done it. Could you say it again?");
+});
+
+test("an open conversational question asked after a job's question gets the answer; later replies reach the job again", async t => {
+  const { engine, store, conversation, advance } = setup(t);
+  const task = store.addTask({ contactId: "owner", sourceGuid: null, text: "plan a trip", time: epoch, hint: null, failure: null, routable: false });
+  store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "question" } });
+  store.enqueue({ key: `task:${task.id}:turn:0:question`, contactId: "owner", target: owner.conversation, text: "Job #1 asks: Which city?",
+    kind: "reply", timer: null }, epoch);
+  await engine.tick();
+  advance(60_000);
+  conversation.understandings.push(understood("reminders"), understood("reminders"));
+  conversation.extractions.push(extraction({ title: "call mom", missing: ["time"] }),
+    extraction({ title: "call mom", when: { kind: "at", amount: null, unit: null, day: "tomorrow", hour: 9, minute: 0 } }));
+  engine.acceptPage("owner", page([message("remind me to call mom", 1, { sentAt: epoch + 60_000 })]));
+  await engine.processPending(); await engine.tick();
+  advance(60_000);
+  engine.acceptPage("owner", page([message("tomorrow at 9", 2, { sentAt: epoch + 120_000 })]));
+  await engine.processPending();
+  assert.equal(store.task(task.id)?.input, null);
+  assert.equal(reminders(store)[0]?.title, "call mom");
+  engine.acceptPage("owner", page([message("Lisbon", 3, { sentAt: epoch + 180_000 })]));
+  assert.match(store.task(task.id)?.input ?? "", /Lisbon/);
+});
+
+test("the service keeps draining other contacts while one contact waits on a model", async t => {
+  const store = new Store(":memory:"); t.after(() => store.close()); enroll(store); enroll(store, member);
+  const transport = new FakeTransport(); const controller = new AbortController();
+  let polls = 0;
+  transport.readAfter = async (conversation, cursor) => {
+    if (conversation.chatId === owner.conversation.chatId)
+      return cursor === 0 ? page([message("hold on a sec", 1, { sentAt: Date.now() })]) : page([], cursor);
+    return polls >= 2 && cursor === 0 ? page([messageFrom(member, "hey there", 2, { sentAt: Date.now() })]) : page([], cursor);
+  };
+  const conversation = new FakeConversation();
+  conversation.understandings.push((_context, signal) => new Promise(resolve => signal.addEventListener("abort", () => resolve(null), { once: true })),
+    understood("chat"));
+  conversation.phrases.push("Hi Sam!");
+  await runService({ config: conversational, store, transport, checkIdentity: () => {}, signal: controller.signal, conversation,
+    wait: async () => { await tick(); await tick(); if (++polls === 8) controller.abort(); } });
+  assert.deepEqual(transport.sent, ["Hi Sam!"]);
+  assert.equal(store.hasPendingMessages("owner"), true);
 });

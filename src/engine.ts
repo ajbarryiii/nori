@@ -2,7 +2,7 @@ import type { ActionPlugin, Budget, OutboxItem, Clarification, Command, CommandA
   Message, MessagePage, MessageTransport, RouteCatalog, RoutingDecision, Runtime, RuntimeConfig, RuntimeEvents, SendOutcome, Task, TaskState,
   TurnContext, TurnOutcome, Understanding, WaitingFor } from "./contracts.js";
 import { normalizeHandle, object, record } from "./config.js";
-import { gate } from "./conversation.js";
+import { gate, type Gate } from "./conversation.js";
 import { checkPlugins, isClarification, PluginHost, type DispatchSource } from "./host.js";
 import { inQuietHours, isCompound, localDay, parseEngineCommand, type EngineCommand } from "./parser.js";
 import { builtinPlugins } from "./plugins/index.js";
@@ -25,6 +25,7 @@ const TURN_LIMIT = 8;
 const OPEN: readonly TaskState[] = ["queued", "routed", "running", "waiting_contact", "waiting_access"];
 const CHAT_TEMPLATE = "I'm here. Tell me what you need, or say ‘help’ to see what I can do.";
 const UNSURE = "I'm not sure what you'd like me to do. Could you say it another way?";
+const CHANGED = "Something changed while I was checking that, so I haven't done it. Could you say it again?";
 const CANCEL_SCHEMA = { type: "object", additionalProperties: false, required: ["job"],
   properties: { job: { anyOf: [{ type: "integer" }, { type: "null" }] } } };
 
@@ -176,11 +177,14 @@ export class Engine {
       }
     }
     // A reply to the runtime's one open question continues that job. With several open, ask once which.
-    // Only a message written after the question was sent (or while it was being sent) can be its answer.
+    // Only a message written after the question was sent (or while it was being sent) can be its answer. A conversational
+    // question Nori sent since then, and still open, gets the answer instead.
+    const open = this.conversation ? this.store.setting(`question:${contact.id}`) : null;
+    const asked = open ? this.store.dispatchedAt(open) : null;
     const asking = this.store.tasks(contact.id).filter(x => {
       const delivered = x.state === "waiting_contact" && x.waitingFor?.kind === "question"
         ? this.store.dispatchedAt(`task:${x.id}:turn:${x.usage.turns}:question`) : null;
-      return delivered !== null && delivered <= message.sentAt;
+      return delivered !== null && delivered <= message.sentAt && !(asked !== null && asked > delivered && asked <= message.sentAt);
     });
     if (asking.length === 1) { reply(this.followUp(contact, asking[0]!, message.text, message.sentAt)); return true; }
     if (asking.length > 1) { reply(`Which job is that for? Reply ${asking.map(x => `‘#${x.number} …’`).join(" or ")}.`); return true; }
@@ -482,7 +486,8 @@ export class Engine {
   /** Turns an understanding into a plan. Models only propose; code gates, resolves, and checks before anything is committed. */
   private async plan(contact: Contact, item: PendingMessage, context: TurnContext, u: Understanding, conversation: ConversationPort,
     signal: AbortSignal): Promise<Plan> {
-    const decided = gate(u, this.config.jev!.thresholds, this.config.jev!.routes);
+    // A second instruction is never truncated into a simpler action, whatever Jev answered.
+    const decided: Gate = isCompound(item.text) ? { kind: "job" } : gate(u, this.config.jev!.thresholds, this.config.jev!.routes);
     switch (decided.kind) {
       case "job": return { kind: "job", decision: u };
       case "chat": return { kind: "chat" };
@@ -538,16 +543,18 @@ export class Engine {
 
   /**
    * Commits a plan with the message's stage. Returns the reply a model may phrase, committed as drafting, or null when
-   * the template reply was committed for sending as is.
+   * the template reply was committed for sending as is. Questions are always sent as written, and the latest one stays
+   * open, ahead of older runtime questions, until the contact's next message is understood.
    */
   private commitPlan(contact: Contact, item: PendingMessage, plan: Plan): Draft | null {
     let draft: Draft | null = null;
     this.commit(() => {
       if (this.store.messageStage(item.guid) !== "pending") return;
       this.store.finishMessage(item.guid);
-      const source = this.source(contact, item);
+      const source = this.source(contact, item); const key = `reply:${item.guid}`;
+      this.store.setSetting(`question:${contact.id}`, plan.kind === "ask" ? key : "");
       const say = (kind: Draft["kind"], template: string, times: number[] = [], mentions = numbers(template)) => {
-        this.enqueue(source, `reply:${item.guid}`, template, "drafting");
+        this.enqueue(source, key, template, "drafting");
         draft = { kind, template, times, mentions };
       };
       switch (plan.kind) {
@@ -563,13 +570,19 @@ export class Engine {
           draft = { kind: "result", template: reply, times: [], mentions: numbers(reply) };
           return;
         }
-        case "ask": say("question", plan.question); return;
+        case "ask": this.enqueue(source, key, plan.question); return;
         case "chat": say("chat", CHAT_TEMPLATE, [], []); return;
         case "status": say("answer", this.status(contact)); return;
         case "answer": say("answer", plan.text); return;
         case "engine": say("result", this.command(contact, plan.command, item.sentAt), [], plan.mentions); return;
         case "plugin": {
           const capture: string[] = []; const id = plan.plugin.manifest.id;
+          // What was verified must still be what would happen; another change may have touched the same item meanwhile.
+          let account: CommandAccount | null = null;
+          try { account = this.host.describe(plan.plugin, source, plan.command); } catch { account = null; }
+          if (account?.description !== plan.account.description || account.times.join() !== plan.account.times.join()) {
+            this.enqueue(source, key, CHANGED); this.store.setSetting(`question:${contact.id}`, key); return;
+          }
           try { this.store.savepoint(() => this.host.invoke(plan.plugin, { ...source, capture }, ctx => plan.plugin.handle(plan.command, ctx))); }
           catch { this.retain(source, item.text, `${id}: handler error`); return; }
           if (capture.length) say("result", capture.join("\n"), plan.account.times);

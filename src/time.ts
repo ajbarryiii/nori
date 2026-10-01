@@ -76,9 +76,14 @@ export function mentionsClock(text: string, at: number, timezone: string): boole
   return new RegExp(`(?<![\\d:])${part("hour")}${minutes}\\s?${period}\\.?m\\b`, "i").test(text.replace(/[  ]/g, " "));
 }
 
+const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+const MONTH_DAY = /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\.?\s+(\d{1,2})(?!\d)/g;
+const NUMERIC_DATE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?![\d/])/g;
+
 /**
  * True when `text` places `at` on the right day: it names that day (today, tomorrow, its weekday, or its date)
- * and names no other. A same-day time may omit the day. Used to reject phrased replies that move a reminder.
+ * and names no other day or calendar date. A same-day time may omit the day. Used to reject phrased replies that move
+ * a reminder.
  */
 export function mentionsDay(text: string, at: number, from: number, timezone: string): boolean {
   const t = text.toLowerCase().replace(/[  ]/g, " ");
@@ -88,7 +93,17 @@ export function mentionsDay(text: string, at: number, from: number, timezone: st
   if ((has("today") || has("tonight") || has("this (?:morning|afternoon|evening)")) && days !== 0) return false;
   if (has("tomorrow") && days !== 1) return false;
   if (WEEKDAYS.some(w => w !== weekday && (has(w) || has(w.slice(0, 3))))) return false;
-  if (days === 0) return true;
+  // Every explicit calendar date must be the target's; one that is counts as naming the day.
+  const target = zoned(at, timezone); let dated = false;
+  for (const [, month, day] of t.matchAll(MONTH_DAY)) {
+    if (MONTHS.findIndex(name => name.startsWith(month!)) + 1 !== target.month || Number(day) !== target.day) return false;
+    dated = true;
+  }
+  for (const [, month, day] of t.matchAll(NUMERIC_DATE)) {
+    if (Number(month) !== target.month || Number(day) !== target.day) return false;
+    dated = true;
+  }
+  if (days === 0 || dated) return true;
   const dates = [format(at, timezone, { month: "short", day: "numeric" }), format(at, timezone, { month: "long", day: "numeric" })]
     .map(x => x.toLowerCase().replace(/ /g, "\\.? "));
   return (days === 1 && has("tomorrow")) || has(weekday) || has(weekday.slice(0, 3)) || dates.some(has);

@@ -57,3 +57,11 @@ test("reply checks require the right day and reject any other", () => {
   assert.ok(mentionsDay("at 3:30 PM", today, epoch, tz));
   assert.ok(!mentionsDay("tomorrow at 3:30 PM", today, epoch, tz));
 });
+
+test("reply checks reject an explicit calendar date other than the committed one", () => {
+  const today = at("2026-09-28T17:00:00Z"); const tomorrow = at("2026-09-29T16:00:00Z");
+  for (const text of ["September 30 at 10 AM", "Sep 30 at 10 AM", "on 9/30 at 10 AM"]) assert.ok(!mentionsDay(text, today, epoch, tz), text);
+  for (const text of ["Tuesday, October 6 at 9 AM", "Tue, Oct. 6 at 9 AM", "tomorrow (Sept 30) at 9 AM"]) assert.ok(!mentionsDay(text, tomorrow, epoch, tz), text);
+  for (const text of ["Tuesday, Sep 29 at 9 AM", "tomorrow, September 29, at 9 AM", "9/29 at 9 AM"]) assert.ok(mentionsDay(text, tomorrow, epoch, tz), text);
+  assert.ok(mentionsDay("today, Sep 28, at 10 AM", today, epoch, tz));
+});

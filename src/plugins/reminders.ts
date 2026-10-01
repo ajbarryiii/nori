@@ -160,6 +160,16 @@ function resolveProposal(proposal: Proposal, ctx: PluginContext): Command | Clar
   }
 }
 
+/**
+ * Names the reminder an implicit `done` or `snooze` means, so the command cannot change target between the contact's
+ * confirmation and the commit. Without exactly one active reminder it asks which.
+ */
+function bind(command: Command, ctx: PluginContext): Command | Clarification {
+  if ((command.kind !== "done" && command.kind !== "snooze") || command.id !== null) return command;
+  const candidates = active(ctx);
+  return candidates.length === 1 ? { ...command, id: candidates[0]!.id } : { clarify: QUESTIONS.which_task };
+}
+
 /** The contact's active reminders and notes, for extraction. */
 function lines(ctx: PluginContext): string {
   const items = active(ctx).slice(0, 30);
@@ -210,7 +220,7 @@ export const reminders: ActionPlugin = {
       core = core.replace(/^(?:please|pls|can you|could you|would you|will you)[\s,]+/i, "").replace(/[\s,]+(?:please|thanks|thank you)$/i, "").trim();
     }
     const direct = match(core, ctx);
-    if (direct && !("clarify" in direct)) return direct;
+    if (direct && !("clarify" in direct)) return bind(direct, ctx);
     if (!ctx.extract) return direct ?? UNSURE;
     const proposal = decodeProposal(await ctx.extract({ instructions: INSTRUCTIONS, schema: EXTRACT_SCHEMA, data: lines(ctx) }));
     return proposal && resolveProposal(proposal, ctx);

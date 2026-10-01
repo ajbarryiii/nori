@@ -105,18 +105,16 @@ test("a phrased result must keep the committed numbers and times", async () => {
   assert.equal(await build(new FakeModel([null])).conversation.phrase(saved, context(), signal), null);
 });
 
-test("answers and questions keep their facts and may name only tracked items", async () => {
+test("answers and chat keep their facts and may name only tracked items", async () => {
   const summary = ["2 active tasks.", "#1: stretch", "#2: call mom"];
   const phrase = async (d: Draft, reply: string) =>
     build(new FakeModel([{ reply }])).conversation.phrase(d, context({ summary, jobs: [{ number: 5, text: "research laptops", state: "routed" }] }), signal);
   const status = draft({ kind: "answer", template: summary.join("\n"), mentions: ["#1", "#2"] });
   assert.equal(await phrase(status, "You have #1 stretch and #2 call mom."), "You have #1 stretch and #2 call mom.");
   assert.equal(await phrase(status, "You have #1 stretch."), null);
-  const question = draft({ kind: "question", template: "Which reminder do you mean?" });
-  assert.equal(await phrase(question, "Sure, which one: #1 or #2?"), "Sure, which one: #1 or #2?");
-  assert.equal(await phrase(question, "Which one, #1, #2, or job #5?"), "Which one, #1, #2, or job #5?");
-  assert.equal(await phrase(question, "Which one, #1 or #9?"), null);
-  assert.equal(await phrase(question, "Okay."), null);
+  const chat = draft({ kind: "chat", template: "I'm here." });
+  assert.equal(await phrase(chat, "You've got #1, #2, and job #5 going."), "You've got #1, #2, and job #5 going.");
+  assert.equal(await phrase(chat, "You've got #1 and #9 going."), null);
   const paused = draft({ template: "All Nori reminder messages are paused. Reply ‘resume’ to restart them.", mentions: ["resume"] });
   assert.equal(await phrase(paused, "Paused. Say resume when you want them back."), "Paused. Say resume when you want them back.");
   assert.equal(await phrase(paused, "Paused."), null);
@@ -136,8 +134,8 @@ test("chat replies change nothing and are screened for claimed actions", async (
   }
 });
 
-test("questions and answers are screened against nothing committed", async () => {
-  for (const [d, reply] of [[draft({ kind: "question", template: "When should I remind you?" }), "I've set that for tomorrow at 9 AM. Anything else?"],
+test("answers and chat are screened against nothing committed", async () => {
+  for (const [d, reply] of [[draft({ kind: "chat", template: "I'm here." }), "I've set that for tomorrow at 9 AM. Anything else?"],
     [draft({ kind: "answer", template: "0 queued jobs." }), "Done, I cancelled it. No jobs are queued."]] as const) {
     const built = build(new FakeModel([{ reply }]), new FakeJudge(0.9, 0.9));
     assert.equal(await built.conversation.phrase(d, context(), signal), null, reply);

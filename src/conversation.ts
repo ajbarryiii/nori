@@ -64,7 +64,7 @@ function allowedNumbers(draft: Draft, c: TurnContext): Set<number> {
   return allowed;
 }
 
-/** Code's checks that a phrased reply still carries the committed facts and adds no numbers, days, or questions of its own. */
+/** Code's checks that a phrased reply still carries the committed facts and adds no numbers or days of its own. */
 function carriesFacts(text: string, draft: Draft, c: TurnContext): boolean {
   if (!text || text.length > MAX_REPLY) return false;
   const allowed = allowedNumbers(draft, c);
@@ -73,8 +73,7 @@ function carriesFacts(text: string, draft: Draft, c: TurnContext): boolean {
     const pattern = mention.startsWith("#") ? `${mention}(?!\\d)` : `\\b${mention.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`;
     if (!new RegExp(pattern, "i").test(text)) return false;
   }
-  if (!draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDay(text, at, c.sentAt, c.timezone))) return false;
-  return draft.kind !== "question" || text.includes("?");
+  return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDay(text, at, c.sentAt, c.timezone));
 }
 
 /**
@@ -106,8 +105,7 @@ export class Conversation implements ConversationPort {
   }
 
   private replyPrompt(draft: Draft, c: TurnContext): string {
-    const did = { result: "Nori has already done exactly what the reply says, and nothing else.",
-      answer: "Nori changed nothing; the reply answers the person.", question: "Nothing changed yet. Ask just this one question." }[draft.kind as Exclude<Draft["kind"], "chat">];
+    const did = draft.kind === "result" ? "Nori has already done exactly what the reply says, and nothing else." : "Nori changed nothing; the reply answers the person.";
     const facts = { what_happened: did, reply_written_by_code: draft.template,
       ...(draft.times.length ? { times: draft.times.map(at => describeWhen(at, c.sentAt, c.timezone)) } : {}),
       must_mention: [...draft.mentions, ...draft.times.map(at => clockText(at, c.timezone))] };
@@ -116,7 +114,7 @@ export class Conversation implements ConversationPort {
       "- Include every value in must_mention exactly as written, and name each time's day.",
       "- Keep numbers like #3 so the person can refer to them later.",
       "- Nori keeps its own lists. Never say a task is in Apple Reminders or Calendar.",
-      "- If the reply asks a question, ask just that one question.", now(c), "",
+      "- Do not ask the person to confirm anything.", now(c), "",
       `<facts>\n${JSON.stringify(facts, null, 1)}\n</facts>`, conversation(c), message(c), "", "Answer with JSON: {\"reply\": \"...\"}"].join("\n");
   }
 

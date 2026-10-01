@@ -284,3 +284,13 @@ test("conversational reminder messages invite a plain answer instead of command 
   plugin.onTimer!({ key: "reminder:1", at: epoch, payload: { id: 1 } }, ctx);
   assert.equal(replies[0], "Reminder: stretch (#1). Tell me when it's done, or ask me to snooze it.");
 });
+
+test("an implicit reminder reference is bound to one reminder or becomes a question", async () => {
+  const one = talking([item(1, "stretch", epoch)], extraction());
+  assert.deepEqual(await plugin.interpret!("could you snooze 20m?", one.ctx), { kind: "snooze", id: 1, minutes: 20 });
+  assert.deepEqual(await plugin.interpret!("done, thanks", one.ctx), { kind: "done", id: 1 });
+  assert.equal(one.requests.length, 0);
+  const two = talking([item(1, "stretch", epoch), item(2, "call mom")], extraction());
+  assert.match((await plugin.interpret!("could you snooze 20m?", two.ctx) as { clarify: string }).clarify, /Which reminder/);
+  assert.deepEqual(await plugin.interpret!("snooze #2 10m please", two.ctx), { kind: "snooze", id: 2, minutes: 10 });
+});
