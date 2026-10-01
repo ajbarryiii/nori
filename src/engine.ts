@@ -225,13 +225,19 @@ export class Engine {
       return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
     } catch { return []; }
   }
+  /** Adds an open prompt. Prompts whose message was withdrawn or never queued are dropped; no open one is ever evicted. */
   private addPrompt(contactId: string, key: string): void {
-    if (this.conversation) this.store.setSetting(`prompts:${contactId}`, JSON.stringify([...this.prompts(contactId), key].slice(-5)));
+    if (!this.conversation) return;
+    const open = [...this.prompts(contactId), key].filter(x => { const status = this.store.outboxStatus(x); return status !== null && status !== "cancelled"; });
+    this.store.setSetting(`prompts:${contactId}`, JSON.stringify([...new Set(open)]));
   }
   /** A message answers the prompts delivered before it was sent; ones not yet delivered, such as a held reminder, stay open. */
   private closePrompts(contactId: string, sentAt: number): void {
     if (!this.conversation) return;
-    const open = this.prompts(contactId).filter(key => { const at = this.store.dispatchedAt(key); return at === null || at > sentAt; });
+    const open = this.prompts(contactId).filter(key => {
+      const at = this.store.dispatchedAt(key); const status = this.store.outboxStatus(key);
+      return status !== null && status !== "cancelled" && (at === null || at > sentAt);
+    });
     this.store.setSetting(`prompts:${contactId}`, JSON.stringify(open));
   }
 
@@ -517,9 +523,12 @@ export class Engine {
     let text: string | null = null;
     // The reply is read now, so its relative days are measured from now, not from when the message was sent.
     try { text = await conversation.phrase(draft, { ...context, now: this.clock() }, signal); } catch { text = null; }
-    this.store.finishDraft(`reply:${item.guid}`, text);
-    // A reply that asks something, as it will be delivered, is an open prompt for the contact's answer.
-    if ((text ?? draft.template).includes("?")) this.addPrompt(contact.id, `reply:${item.guid}`);
+    // A reply that asks something, as it will be delivered, is an open prompt for the contact's answer. The reply is released
+    // and its prompt recorded together, so a crash cannot deliver a question nobody is waiting on.
+    this.store.transaction(() => {
+      this.store.finishDraft(`reply:${item.guid}`, text);
+      if ((text ?? draft.template).includes("?")) this.addPrompt(contact.id, `reply:${item.guid}`);
+    });
   }
 
   /** Everything a model may see about this message, built from the store. */

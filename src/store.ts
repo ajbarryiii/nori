@@ -351,6 +351,11 @@ export class Store {
     const row = this.db.prepare("SELECT dispatched_at FROM outbox WHERE dedup_key=? AND status IN ('sending','sent','uncertain')").get(key);
     return row === undefined || row.dispatched_at === null ? null : Number(row.dispatched_at);
   }
+  /** The status of the outbox item with this key, or null when there is none. */
+  outboxStatus(key: string): OutboxItem["status"] | null {
+    const row = this.db.prepare("SELECT status FROM outbox WHERE dedup_key=?").get(key);
+    return row ? row.status as OutboxItem["status"] : null;
+  }
   /** Withdraws a job's unsent interruption and budget-limit notices once it continues. */
   cancelPauseNotices(taskId: number): void {
     const prefix = `task:${taskId}:`;

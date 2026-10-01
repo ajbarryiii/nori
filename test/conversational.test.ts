@@ -801,3 +801,36 @@ test("without the responder, saved conversational prompts do not take answers fr
   plain.acceptPage("owner", page([message("Lisbon", 1, { sentAt: epoch + 60_000 })]));
   assert.match(store.task(task.id)?.input ?? "", /Lisbon/);
 });
+
+test("reminders firing while held never push out an open question that still needs its answer", async t => {
+  const { engine, store, conversation, advance } = setup(t);
+  engine.acceptPage("owner", page([...[1, 2, 3, 4, 5].map(n => message(`remind me to stretch ${n} in 10 minutes`, n)), message("pause all", 6)]));
+  const task = store.addTask({ contactId: "owner", sourceGuid: null, text: "plan a trip", time: epoch, hint: null, failure: null, routable: false });
+  store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "question" } });
+  store.enqueue({ key: `task:${task.id}:turn:0:question`, contactId: "owner", target: owner.conversation, text: "Job #1 asks: Which city?",
+    kind: "reply", timer: null }, epoch);
+  await engine.tick();
+  advance(60_000);
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ title: "call mom", missing: ["time"] }));
+  engine.acceptPage("owner", page([message("remind me to call mom", 7, { sentAt: epoch + 60_000 })]));
+  await engine.processPending(); await engine.tick();
+  advance(10 * 60_000); await engine.tick();
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ title: "call mom", when: { kind: "at", amount: null, unit: null, day: "tomorrow", hour: 9, minute: 0 } }));
+  engine.acceptPage("owner", page([message("tomorrow at 9", 8, { sentAt: epoch + 11 * 60_000 })]));
+  await engine.processPending();
+  assert.equal(store.task(task.id)?.input, null);
+  assert.equal(reminders(store).at(-1)?.title, "call mom");
+});
+
+test("a phrased reply and its open-prompt marker commit together", async t => {
+  const { engine, store, conversation } = setup(t);
+  conversation.understandings.push(understood("chat"));
+  conversation.phrases.push("Want to talk about it?");
+  engine.acceptPage("owner", page([message("rough day")]));
+  const setSetting = store.setSetting.bind(store);
+  store.setSetting = (key, value) => { if (key === "prompts:owner" && value.includes("reply:")) throw new Error("crash"); setSetting(key, value); };
+  await assert.rejects(engine.processPending(), /crash/);
+  assert.deepEqual(store.outbox().map(x => [x.status, x.text]), [["drafting", "I'm here. Tell me what you need, or say ‘help’ to see what I can do."]]);
+});
