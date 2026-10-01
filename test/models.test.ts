@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CodexModel, codexAppServerArgs } from "../src/codex.js";
+import { CodexModel, codexAppServerArgs, codexResponderFeatures } from "../src/codex.js";
 import { REPLY_SCHEMA } from "../src/conversation.js";
 import { JevJudge, JevUnderstander } from "../src/jev.js";
 import { OpenRouterModel } from "../src/openrouter.js";
@@ -122,8 +122,9 @@ test("Jev checks return a probability or abstain", async () => {
 class FakeCodex implements RpcPort {
   calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   closed = false; threads = 0;
-  /** The effective configuration `config/read` reports. */
-  config: Record<string, unknown> = {};
+  /** The effective configuration `config/read` reports: by default, exactly what the responder's flags ask for. */
+  config: Record<string, unknown> = { features: Object.fromEntries(codexResponderFeatures.map(name => [name, false])),
+    web_search: "disabled", mcp_servers: {} };
   constructor(public handlers: RpcHandlers, public script: (rpc: FakeCodex, threadId: string, turnId: string) => void) {}
   emit(method: string, params: Record<string, unknown>) { this.handlers.notification?.(method, params); }
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
@@ -169,7 +170,8 @@ test("Codex responder runs one read-only, ephemeral, tool-free turn per request"
   assert.deepEqual(turn.input, [{ type: "text", text: "Say hi.", text_elements: [] }]);
   assert.equal(turn.outputSchema, REPLY_SCHEMA); assert.equal(turn.threadId, "thread-1");
   assert.deepEqual(meter.records.map(x => x.ok), [true, true]);
-  for (const flag of ["shell_tool", "unified_exec", "apps", "plugins", "computer_use", "browser_use"]) assert.ok(codexAppServerArgs.includes(flag), flag);
+  for (const flag of ["shell_tool", "unified_exec", "apps", "plugins", "computer_use", "browser_use", "view_image", "skill_search", "sleep_tool"])
+    assert.ok(codexAppServerArgs.includes(flag) && codexResponderFeatures.includes(flag), flag);
   assert.ok(codexAppServerArgs.includes('web_search="disabled"')); assert.ok(codexAppServerArgs.includes("mcp_servers={}"));
   model.close(); assert.equal(rpc.closed, true);
 });
@@ -317,7 +319,7 @@ test("the Codex responder refuses a connection whose effective configuration sti
     [{}, true]] as const) {
     const made = connector(finish("completed", '{"reply":"hi"}'));
     const model = new CodexModel({ model: "gpt-6-luna", timeoutMs: 1000, cwd: "/tmp", connect: handlers => {
-      const rpc = made.connect(handlers); rpc.config = { mcp_servers: servers }; return rpc;
+      const rpc = made.connect(handlers); rpc.config = { ...rpc.config, mcp_servers: servers }; return rpc;
     } });
     assert.equal((await model.generate(request, signal)) !== null, usable, JSON.stringify(servers));
     const rpc = made.made[0]!;
@@ -341,4 +343,21 @@ test("Jev distributions must name exactly the catalog's options", async () => {
     route: { type: "choice", choice: "reminders", confidence: 0.9, probabilities: extra }, multiple: { type: "noul", noul: 0 },
     outbound: { type: "noul", noul: 0 } })).fetch });
   assert.equal(await bad.understand(context, signal), null);
+});
+
+test("the Codex responder refuses a connection where any of its tool restrictions did not take effect", async () => {
+  const cases: Array<(config: Record<string, unknown>) => Record<string, unknown>> = [
+    config => ({ ...config, features: { ...config.features as object, view_image: true } }),
+    config => ({ ...config, features: { ...config.features as object, shell_tool: undefined } }),
+    config => ({ ...config, web_search: "live" }),
+  ];
+  for (const change of cases) {
+    const made = connector(finish("completed", '{"reply":"hi"}'));
+    const model = new CodexModel({ model: "gpt-6-luna", timeoutMs: 1000, cwd: "/tmp", connect: handlers => {
+      const rpc = made.connect(handlers); rpc.config = change(rpc.config); return rpc;
+    } });
+    assert.equal(await model.generate(request, signal), null);
+    assert.equal(made.made[0]!.calls.some(x => x.method === "thread/start"), false);
+    assert.equal(made.made[0]!.closed, true);
+  }
 });

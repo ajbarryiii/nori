@@ -182,8 +182,15 @@ export class Engine {
         if (isClarification(result)) { if (this.conversation) return false; reply(result.clarify); return true; }
         const valid = this.host.validate(plugin, result);
         if (!valid) { this.retain(source, message.text, `${id}: invalid command`); return true; }
-        try { this.store.savepoint(() => this.host.invoke(plugin, source, ctx => plugin.handle(valid, ctx))); }
-        catch { this.retain(source, message.text, `${id}: handler error`); }
+        // Replies are collected and then enqueued, so one that asks something becomes an open prompt in conversation.
+        const capture: string[] = [];
+        try { this.store.savepoint(() => this.host.invoke(plugin, { ...source, capture }, ctx => plugin.handle(valid, ctx))); }
+        catch { this.retain(source, message.text, `${id}: handler error`); return true; }
+        capture.forEach((text, n) => {
+          const key = source.replyKey(n);
+          this.enqueue(source, key, text);
+          if (text.includes("?")) this.addPrompt(contact.id, key);
+        });
         return true;
       }
     }
@@ -545,7 +552,8 @@ export class Engine {
       { kind: "engine", command: { kind: "pause", scope: "all" }, mentions: ["resume"] });
     if (option === "resume") return confirm("resume reminder messages now", { kind: "engine", command: { kind: "resume" }, mentions: [] });
     if (option === "continue") {
-      const waiting = this.waitingOnQuestion(contact);
+      // Only a question delivered before the message was sent can be what it answers.
+      const waiting = this.waitingOnQuestion(contact).filter(({ delivered }) => delivered <= item.sentAt);
       if (waiting.length !== 1) return { kind: "job", decision: u };
       const { task } = waiting[0]!;
       return confirm(`send your reply to job #${task.number}${task.outcome ? ` (which asked: “${clip(task.outcome, 80)}”)` : ""}`,

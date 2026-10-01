@@ -422,13 +422,15 @@ export class CodexRuntime implements Runtime {
 }
 
 /**
- * App-server flags for a plain conversational turn: no shell, apps, plugins, browser, computer use, image generation,
- * sub-agents, memories, hooks, or web search, and no MCP servers. Checked against codex-cli 0.156.1.
+ * Codex features the responder turns off: shell, apps, plugins, browsers, computer use, image generation and viewing,
+ * sub-agents, goals, memories, hooks, tool suggestions, skills search, and sleep. Checked against codex-cli 0.156.1, whose
+ * `config/read` reports each one.
  */
-export const codexAppServerArgs = ["app-server",
-  ...["shell_tool", "unified_exec", "apps", "plugins", "browser_use", "browser_use_external", "in_app_browser", "computer_use",
-    "image_generation", "multi_agent", "multi_agent_v2", "goals", "memories", "hooks", "tool_suggest", "skill_mcp_dependency_install"]
-    .flatMap(feature => ["--disable", feature]),
+export const codexResponderFeatures: readonly string[] = ["shell_tool", "unified_exec", "apps", "plugins", "browser_use",
+  "browser_use_external", "in_app_browser", "computer_use", "image_generation", "view_image", "multi_agent", "multi_agent_v2", "goals",
+  "memories", "hooks", "tool_suggest", "skill_mcp_dependency_install", "skill_search", "sleep_tool"];
+/** App-server flags for a plain conversational turn: those features off, web search disabled, and no MCP servers. */
+export const codexAppServerArgs = ["app-server", ...codexResponderFeatures.flatMap(feature => ["--disable", feature]),
   "-c", 'web_search="disabled"', "-c", "mcp_servers={}"];
 
 /** Spawns the responder's tool-free `codex app-server` with Nori's Codex home and a minimal environment. */
@@ -482,10 +484,14 @@ export class CodexModel implements LanguageModel {
         // close() may have run while initialize was in flight; never keep an app-server nobody will close.
         if (this.closed) throw new Error("Codex responder closed during startup.");
         rpc.notify("initialized", {});
-        // A lower configuration layer can add MCP servers that the `mcp_servers={}` override does not remove, and their tools
-        // would bypass Nori. Only a connection whose effective configuration has no enabled MCP server is used.
+        // The flags must have taken effect: a lower configuration layer can add MCP servers that the `mcp_servers={}` override
+        // does not remove, and any tool left on would let a contact's text reach local data. Only a connection whose effective
+        // configuration shows every restriction is used.
         const config = record(record(await rpc.request("config/read", { includeLayers: false, cwd: this.options.cwd }))?.config);
         if (!config) throw new Error("Codex did not report its configuration.");
+        const features = record(config.features);
+        if (!features || codexResponderFeatures.some(name => features[name] !== false) || config.web_search !== "disabled")
+          throw new Error("Codex did not apply the responder's tool restrictions.");
         const servers = config.mcp_servers;
         if (servers != null && (!record(servers) || Object.values(servers).some(server => record(server)?.enabled !== false)))
           throw new Error("An MCP server is configured for the Codex responder.");

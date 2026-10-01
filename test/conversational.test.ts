@@ -697,3 +697,43 @@ test("with until, tasks held by the daily Jev limit do not keep the service runn
   assert.deepEqual(store.unroutedTasks().map(x => x.text), ["please research laptops"]);
   assert.match(transport.sent[0]!, /^Saved job #1/);
 });
+
+test("continue answers only a job question delivered before the message was sent", async t => {
+  const { engine, store, conversation, advance } = setup(t);
+  const task = store.addTask({ contactId: "owner", sourceGuid: null, text: "plan a trip", time: epoch, hint: null, failure: null, routable: false });
+  let release!: (value: Understanding | null) => void;
+  conversation.understandings.push(() => new Promise(resolve => { release = resolve; }));
+  engine.acceptPage("owner", page([message("Lisbon sounds great")]));
+  const processing = engine.processPending();
+  while (!release) await tick();
+  // The job asks its question a minute after the message was sent.
+  advance(60_000);
+  store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "question" }, outcome: "Which city?" });
+  store.enqueue({ key: `task:${task.id}:turn:0:question`, contactId: "owner", target: owner.conversation, text: "Job #1 asks: Which city?",
+    kind: "reply", timer: null }, epoch + 60_000);
+  await engine.tick();
+  release(understood("continue")); await processing;
+  assert.equal(store.task(task.id)?.input, null);
+  assert.equal(store.task(task.id)?.state, "waiting_contact");
+  assert.deepEqual(conversation.proposals, []);
+});
+
+test("a question a grammar handler asks is an open prompt, so its answer reaches understanding", async t => {
+  const { engine, store, conversation, advance } = setup(t);
+  const task = store.addTask({ contactId: "owner", sourceGuid: null, text: "plan a trip", time: epoch, hint: null, failure: null, routable: false });
+  store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "question" } });
+  store.enqueue({ key: `task:${task.id}:turn:0:question`, contactId: "owner", target: owner.conversation, text: "Job #1 asks: Which city?",
+    kind: "reply", timer: null }, epoch);
+  engine.acceptPage("owner", page([message("note stretch"), message("note call mom", 2)]));
+  await engine.tick();
+  advance(60_000);
+  engine.acceptPage("owner", page([message("done", 3, { sentAt: epoch + 60_000 })]));
+  await engine.tick();
+  assert.match(texts(store).at(-1)!, /^Which reminder\?/);
+  advance(60_000);
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ action: "done", task_id: 2 }));
+  engine.acceptPage("owner", page([message("the mom one", 4, { sentAt: epoch + 120_000 })]));
+  await engine.processPending();
+  assert.deepEqual([store.task(task.id)?.input, reminders(store).map(x => x.status)], [null, ["active", "completed"]]);
+});
