@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clockText, describeWhen, localNow, mentionsClock, mentionsDate, mentionsDay, resolveWhen, shortWhen } from "../src/time.js";
+import { clockText, describeWhen, localNow, mentionsClock, mentionsDate, mentionsDay, resolveWhen, shortWhen, statesOnly } from "../src/time.js";
 import { epoch } from "./helpers.js";
 
 // epoch is Monday, September 28, 2026 at 9:00 AM in America/Los_Angeles.
@@ -92,4 +92,13 @@ test("a weekday whose time already passed today means next week, even across a D
   assert.equal(resolveWhen({ kind: "at", day: "sunday", hour: 2, minute: 30 }, at("2027-03-14T19:00:00Z"), tz), at("2027-03-21T09:30:00Z"));
   // A gap or repeat on the target date itself is still refused.
   assert.equal(resolveWhen({ kind: "at", day: "sunday", hour: 1, minute: 30 }, at("2026-10-28T20:00:00Z"), tz), null);
+});
+
+test("only committed times, dates, and weekdays may be stated, in any common form", () => {
+  const due = at("2026-10-15T19:00:00Z"); // Thursday, October 15, 2026 at noon
+  for (const text of ["Thu, Oct 15 at 12 PM", "October 15, 2026 at noon", "on 2026-10-15 at 12:00", "Thursday at 12 p.m."])
+    assert.ok(statesOnly(text, [due], tz), text);
+  for (const text of ["on 2026-10-16", "at midnight", "at 1 PM", "Friday", "Oct 15, 2027", "13:30"]) assert.ok(!statesOnly(text, [due], tz), text);
+  assert.ok(statesOnly("No times here.", [], tz));
+  assert.ok(!statesOnly("See you at noon.", [], tz));
 });

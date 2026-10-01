@@ -5,8 +5,8 @@ import { optionId } from "./host.js";
 import { clockText, localNow, localStamp, mentionsClock, mentionsDate, mentionsDay, shortWhen, statesOnly } from "./time.js";
 
 const MAX_REPLY = 700;
-/** Day words whose meaning depends on when a reply is read. */
-const RELATIVE_DAY = /\b(?:today|tonight|tomorrow|yesterday|this (?:morning|afternoon|evening))\b/i;
+/** Day and duration words whose meaning depends on when a reply is read. */
+const RELATIVE = /\b(?:today|tonight|tomorrow|yesterday|this (?:morning|afternoon|evening|week|weekend)|next (?:week|weekend|month|year)|in (?:a|an|\d+|a few|a couple of) (?:minutes?|hours?|days?|weeks?))\b/i;
 /** Conversational options the engine itself can change state for; plugins are the others that act. */
 const ENGINE_CHANGES = new Set(["pause", "resume", "cancel"]);
 
@@ -81,7 +81,7 @@ function carriesFacts(text: string, draft: Draft, c: TurnContext): boolean {
   }
   // A reply may be read on a later day than it was written, so a stated time carries its date and no relative day. And it
   // may name no time, date, or weekday that code did not commit, so chat names none.
-  if (draft.times.length && RELATIVE_DAY.test(text)) return false;
+  if (RELATIVE.test(text)) return false;
   if (!statesOnly(text, draft.times, c.timezone)) return false;
   return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDate(text, at, c.timezone, c.now) && mentionsDay(text, at, c.now, c.timezone));
 }
@@ -121,7 +121,7 @@ export class Conversation implements ConversationPort {
       must_mention: [...draft.mentions, ...draft.times.map(at => clockText(at, c.timezone))] };
     return ["Rewrite Nori's reply to the person's latest message in Nori's voice.",
       "- Keep every fact in <facts>. Do not add promises, actions, or details that are not there.",
-      "- Include every value in must_mention exactly as written, and give each time with its date as in times. Never say today, tonight, or tomorrow: the reply may be read on another day.",
+      "- Include every value in must_mention exactly as written, and give each time with its date as in times. Never say today, tonight, tomorrow, or in an hour: the reply may be read later.",
       "- Keep numbers like #3 so the person can refer to them later.",
       "- Nori keeps its own lists. Never say a task is in Apple Reminders or Calendar.",
       "- Do not ask the person to confirm anything.", now(c), "",
@@ -133,7 +133,7 @@ export class Conversation implements ConversationPort {
     return ["Reply to the person's latest message as Nori. This reply changes nothing: nothing is saved, scheduled, completed, cancelled, or sent.",
       "- Answer from <tracking>, <jobs>, and the conversation. If you don't know, say so briefly.",
       "- Never say you saved, scheduled, changed, sent, or will do anything.",
-      "- Do not state times, dates, or weekdays. If they ask when something is, suggest they ask for their status.",
+      "- Do not state times, dates, weekdays, or words like today, tomorrow, or in an hour. If they ask when something is, suggest they ask for their status.",
       `- If they seem to want something done, suggest one plain way to ask. Nori can: ${abilities.join("; ")}.`,
       now(c), `Reminder messages: ${c.paused === "all" ? "paused" : "on"}`, "",
       `<tracking>\n${c.summary.slice(0, 20).map(x => clip(x, 160)).join("\n") || "none"}\n</tracking>`, `<jobs>\n${jobLines(c)}\n</jobs>`,

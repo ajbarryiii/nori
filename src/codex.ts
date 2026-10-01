@@ -526,7 +526,8 @@ export class CodexModel implements LanguageModel {
         outputSchema: request.schema, effort: "low" });
       const turn = record(await within(starting));
       turnId = text(record(turn?.turn)?.id);
-      if (!turnId) return null;
+      // A start without a turn id leaves the server state unknown, so it is cleaned up like an unconfirmed start.
+      if (!turnId) throw new Error("Codex did not return a turn.");
       let reply: string | null = null; let seen = 0;
       while (status === null) {
         for (; seen < events.length; seen++) {
@@ -571,8 +572,11 @@ export class CodexModel implements LanguageModel {
           this.listeners.add(watch);
           starting.then(response => {
             this.listeners.delete(watch);
+            if (found) return;
+            // A late response names the turn to interrupt; one that names none leaves it unknown, so the connection goes.
             const id = text(record(record(response)?.turn)?.id);
-            if (id && !found) { found = true; interrupt(id); }
+            found = true;
+            if (id) interrupt(id); else abandon();
           }, () => {
             this.listeners.delete(watch);
             if (!found) abandon();

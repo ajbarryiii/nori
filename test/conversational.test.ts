@@ -765,3 +765,39 @@ test("a valid long reminder title gets a shortened description instead of failin
   assert.equal(store.tasks().length, 0);
   assert.ok(conversation.proposals[0]!.length < 200);
 });
+
+test("a message's context leaves out Nori messages delivered after it was sent", async t => {
+  const { engine, store, conversation, advance } = setup(t);
+  let release!: (value: Understanding | null) => void;
+  conversation.understandings.push(() => new Promise(resolve => { release = resolve; }), understood("chat"));
+  engine.acceptPage("owner", page([message("hmm"), message("yes", 2)]));
+  const processing = engine.processPending();
+  while (!release) await tick();
+  // A Nori message delivered after both were sent.
+  advance(60_000);
+  store.enqueue({ key: "reply:later", contactId: "owner", target: owner.conversation, text: "Did you mean: pause all reminder messages? Say yes.",
+    kind: "reply", timer: null }, epoch + 60_000);
+  await engine.tick();
+  release(understood("chat")); await processing;
+  assert.deepEqual(conversation.understood[1]?.turns.map(x => x.text), ["hmm"]);
+  assert.deepEqual(store.recentTurns("owner", epoch - 1, 8, epoch).map(x => x.text), ["hmm", "yes"]);
+});
+
+test("without the responder, saved conversational prompts do not take answers from a waiting job", async t => {
+  const { store, engine, advance } = setup(t);
+  const task = store.addTask({ contactId: "owner", sourceGuid: null, text: "plan a trip", time: epoch, hint: null, failure: null, routable: false });
+  store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "question" } });
+  store.enqueue({ key: `task:${task.id}:turn:0:question`, contactId: "owner", target: owner.conversation, text: "Job #1 asks: Which city?",
+    kind: "reply", timer: null }, epoch);
+  await engine.tick();
+  // A conversational question delivered after the job's, left open when the responder was turned off.
+  advance(30_000);
+  store.enqueue({ key: "reply:asked", contactId: "owner", target: owner.conversation, text: "When should I remind you?", kind: "reply", timer: null },
+    epoch + 30_000);
+  await engine.tick();
+  store.setSetting("prompts:owner", JSON.stringify(["reply:asked"]));
+  advance(30_000);
+  const plain = new Engine({ ...conversational, jev: null, responder: null }, store, new FakeTransport(), { clock: () => epoch + 60_000 });
+  plain.acceptPage("owner", page([message("Lisbon", 1, { sentAt: epoch + 60_000 })]));
+  assert.match(store.task(task.id)?.input ?? "", /Lisbon/);
+});

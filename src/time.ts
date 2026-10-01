@@ -91,7 +91,8 @@ export function statesOnly(text: string, times: readonly number[], timezone: str
   const t = text.replace(/[  ]/g, " ");
   const targets = times.map(at => zoned(at, timezone));
   const clocks = [...[...t.matchAll(CLOCK_12)].map(([, h, m, p]) => (Number(h) % 12 + (p!.toLowerCase() === "p" ? 12 : 0)) * 60 + Number(m ?? 0)),
-    ...[...t.matchAll(CLOCK_24)].map(([, h, m]) => Number(h) * 60 + Number(m))];
+    ...[...t.matchAll(CLOCK_24)].map(([, h, m]) => Number(h) * 60 + Number(m)),
+    ...(/\bnoon\b/i.test(t) ? [12 * 60] : []), ...(/\bmidnight\b/i.test(t) ? [0] : [])];
   if (clocks.some(minutes => !targets.some(x => x.hour * 60 + x.minute === minutes))) return false;
   if (explicitDates(t).some(d => !targets.some(x => x.month === d.month && x.day === d.day && (d.year === null || d.year === x.year)))) return false;
   const weekdays = [...WEEKDAYS.filter(w => new RegExp(`\\b${w}\\b`, "i").test(t)),
@@ -116,13 +117,15 @@ export function mentionsClock(text: string, at: number, timezone: string): boole
 const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 const MONTH_DAY = /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\.?\s+(\d{1,2})(?!\d)(?:st|nd|rd|th)?(?:,?\s+(\d{4})(?!\d))?/g;
 const NUMERIC_DATE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/])/g;
+const ISO_DATE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
 
-/** Explicit calendar dates in `text` ("Sep 29", "September 29, 2026", "9/29", "9/29/2026"), with the year when one is given. */
+/** Explicit calendar dates in `text` ("Sep 29", "September 29, 2026", "9/29", "9/29/2026", "2026-09-29"), with the year when given. */
 function explicitDates(text: string): Array<{ month: number; day: number; year: number | null }> {
   const t = text.toLowerCase().replace(/[  ]/g, " ");
   const year = (value: string | undefined) => value === undefined ? null : value.length === 2 ? 2000 + Number(value) : Number(value);
   return [...[...t.matchAll(MONTH_DAY)].map(([, month, day, y]) => ({ month: MONTHS.findIndex(name => name.startsWith(month!)) + 1, day: Number(day), year: year(y) })),
-    ...[...t.matchAll(NUMERIC_DATE)].map(([, month, day, y]) => ({ month: Number(month), day: Number(day), year: year(y) }))];
+    ...[...t.matchAll(NUMERIC_DATE)].map(([, month, day, y]) => ({ month: Number(month), day: Number(day), year: year(y) })),
+    ...[...t.matchAll(ISO_DATE)].map(([, y, month, day]) => ({ month: Number(month), day: Number(day), year: Number(y) }))];
 }
 
 /**

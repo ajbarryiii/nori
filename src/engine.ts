@@ -197,7 +197,7 @@ export class Engine {
     // A reply to the runtime's one open question continues that job. With several open, ask once which.
     // Only a message written after the question was sent (or while it was being sent) can be its answer. A conversational
     // question Nori sent since then, and still open, gets the answer instead.
-    const prompted = this.prompts(contact.id).map(key => this.store.dispatchedAt(key))
+    const prompted = !this.conversation ? [] : this.prompts(contact.id).map(key => this.store.dispatchedAt(key))
       .filter((at): at is number => at !== null && at <= message.sentAt);
     const asking = this.waitingOnQuestion(contact).filter(({ delivered }) => delivered <= message.sentAt
       && !prompted.some(at => at > delivered)).map(({ task }) => task);
@@ -528,7 +528,8 @@ export class Engine {
     return { contact, text: item.text, sentAt: item.sentAt, now: this.clock(), timezone: this.config.timezone,
       catalog: this.host.catalog(contact, { conversational: true }), summary: this.summaries(contact),
       jobs: this.store.tasks(contact.id).filter(x => OPEN.includes(x.state)).slice(0, 5).map(x => ({ number: x.number, text: x.text, state: x.state })),
-      turns: this.store.recentTurns(contact.id, this.clock() - TURN_WINDOW_MS, TURN_LIMIT),
+      // Only what the contact could have seen when they sent the message.
+      turns: this.store.recentTurns(contact.id, this.clock() - TURN_WINDOW_MS, TURN_LIMIT, item.sentAt),
       paused: pause === "all" || pause === "nudges" ? pause : "none" };
   }
 

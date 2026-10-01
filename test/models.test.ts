@@ -361,3 +361,24 @@ test("the Codex responder refuses a connection where any of its tool restriction
     assert.equal(made.made[0]!.closed, true);
   }
 });
+
+test("a malformed Codex turn start is cleaned up like an unconfirmed one", async () => {
+  for (const notice of [true, false]) {
+    const made = connector(() => {});
+    const model = new CodexModel({ model: "gpt-6-luna", timeoutMs: 1000, cwd: "/tmp", connect: handlers => {
+      const rpc = made.connect(handlers); const original = rpc.request.bind(rpc);
+      rpc.request = async (method, params) => {
+        if (method !== "turn/start") return original(method, params);
+        rpc.calls.push({ method, params });
+        if (notice) rpc.emit("turn/started", { threadId: params.threadId, turn: { id: "turn-real" } });
+        return { turn: {} };
+      };
+      return rpc;
+    } });
+    assert.equal(await model.generate(request, signal), null);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    const rpc = made.made[0]!;
+    if (notice) assert.ok(rpc.calls.some(x => x.method === "turn/interrupt" && x.params.turnId === "turn-real"));
+    else assert.equal(rpc.closed, true);
+  }
+});

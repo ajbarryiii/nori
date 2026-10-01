@@ -205,17 +205,20 @@ export class Store {
   }
   /**
    * The contact's conversation, oldest first: handled messages, and Nori messages whose send began (so a question still
-   * being sent is visible to its answer), timed by when they were sent. A reply sorts after the message it answers.
+   * being sent is visible to its answer), timed by when they were sent, up to `until`. A reply sorts after the message it
+   * answers.
    */
-  recentTurns(contactId: string, since: number, limit: number): Turn[] {
+  recentTurns(contactId: string, since: number, limit: number, until = Number.MAX_SAFE_INTEGER): Turn[] {
     const rows = this.db.prepare(`
-      SELECT 'contact' AS source, text, sent_at AS at, row_id AS ord, 0 AS phase FROM inbox WHERE contact_id=? AND stage='done' AND sent_at>=?
+      SELECT 'contact' AS source, text, sent_at AS at, row_id AS ord, 0 AS phase FROM inbox
+        WHERE contact_id=? AND stage='done' AND sent_at>=? AND sent_at<=?
       UNION ALL
       SELECT 'nori', o.text, coalesce(o.dispatched_at, o.available_at), coalesce(i.row_id, 0), 1 FROM outbox o
         LEFT JOIN inbox i ON i.contact_id=o.contact_id
           AND (o.dedup_key='reply:' || i.guid OR substr(o.dedup_key, 1, length(i.guid) + 7)='reply:' || i.guid || ':')
-        WHERE o.contact_id=? AND o.status IN ('sending','sent','uncertain') AND coalesce(o.dispatched_at, o.available_at)>=?
-      ORDER BY at DESC, ord DESC, phase DESC LIMIT ?`).all(contactId, since, contactId, since, limit);
+        WHERE o.contact_id=? AND o.status IN ('sending','sent','uncertain')
+          AND coalesce(o.dispatched_at, o.available_at)>=? AND coalesce(o.dispatched_at, o.available_at)<=?
+      ORDER BY at DESC, ord DESC, phase DESC LIMIT ?`).all(contactId, since, until, contactId, since, until, limit);
     return rows.reverse().map(row => ({ from: row.source === "contact" ? "contact" : "nori", text: String(row.text), at: Number(row.at) }));
   }
 
