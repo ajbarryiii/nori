@@ -524,11 +524,13 @@ test("controls that stop activity apply at once behind a pending message; other 
   while (!release) await tick();
   engine.acceptPage("owner", page([message("cancel #1", 3), message("status", 4), message("deny A9", 5)]));
   assert.equal(store.tasks()[0]?.state, "cancelled");
-  assert.deepEqual(texts(store).slice(1), ["Cancelled job #1.", "Approval A9 is not pending."]);
-  assert.equal(store.messageStage("guid-4"), "pending");
+  assert.deepEqual(texts(store).slice(1), ["Cancelled job #1."]);
+  // Status waits its turn, and so does a deny with no such approval pending: it would stop nothing now.
+  assert.deepEqual([store.messageStage("guid-4"), store.messageStage("guid-5")], ["pending", "pending"]);
   release(understood("chat")); await processing;
   while (store.hasPendingMessages()) await engine.processPending();
-  assert.match(texts(store).at(-1)!, /0 queued jobs/);
+  assert.deepEqual(texts(store).slice(-2).map(x => x.split("\n").find(line => /queued jobs|not pending/.test(line))),
+    ["0 queued jobs.", "Approval A9 is not pending."]);
 });
 
 test("replies are written with the current time, while the message keeps its own", async t => {
@@ -845,4 +847,37 @@ test("a control that skips the queue leaves open prompts for the earlier message
   await engine.processPending();
   assert.equal(store.task(task.id)?.input, null);
   assert.equal(reminders(store).at(-1)?.title, "call mom");
+});
+
+test("a cancel for a job an earlier pending message is about to create waits its turn and still applies", async t => {
+  const { engine, store, conversation } = setup(t);
+  conversation.understandings.push(understood("runtime"));
+  engine.acceptPage("owner", page([message("research laptop options"), message("cancel #1", 2)]));
+  assert.equal(store.messageStage("guid-2"), "pending");
+  while (store.hasPendingMessages()) await engine.processPending();
+  assert.deepEqual(store.tasks().map(x => [x.text, x.state]), [["research laptop options", "cancelled"]]);
+});
+
+test("a message handled long after it was sent still sees the conversation from when it was sent", async t => {
+  const { engine, conversation, advance } = setup(t);
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ title: "call mom", missing: ["time"] }));
+  engine.acceptPage("owner", page([message("remind me to call mom")]));
+  await engine.processPending(); await engine.tick();
+  advance(15 * 3_600_000);
+  conversation.understandings.push(understood("chat"));
+  engine.acceptPage("owner", page([message("tomorrow at 9", 2, { sentAt: epoch + 60_000 })]));
+  await engine.processPending();
+  assert.deepEqual(conversation.understood[1]?.turns.map(x => x.text), ["remind me to call mom", "When should I remind you?"]);
+});
+
+test("a plugin query routed conversationally is answered exactly as the plugin wrote it", async t => {
+  const { engine, store, conversation } = setup(t);
+  engine.acceptPage("owner", page([message("note buy milk")]));
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ action: "list", title: null }));
+  engine.acceptPage("owner", page([message("what have I got on there?", 2)]));
+  await engine.processPending();
+  assert.equal(texts(store).at(-1), "1 active tasks:\n#1: buy milk");
+  assert.equal(conversation.drafts.length, 0);
 });

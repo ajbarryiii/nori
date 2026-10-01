@@ -232,6 +232,8 @@ export interface CommandAccount {
   description: string;
   /** Instants the command sets. A phrased reply must state each one's day and clock time. */
   times: number[];
+  /** False for a command that only reports, such as a list. Its reply is sent exactly as written, never phrased. */
+  changes: boolean;
 }
 
 export interface Timer {

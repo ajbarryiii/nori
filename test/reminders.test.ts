@@ -271,13 +271,13 @@ test("describe gives the code-written account a contact can confirm", () => {
   const { ctx } = talking([item(1, "stretch", epoch), item(2, "call mom")], null);
   const due = at("2026-09-29T17:00:00Z");
   assert.deepEqual(plugin.describe!({ kind: "remind", title: "call mom", dueAt: due }, ctx),
-    { description: "remind you about “call mom” tomorrow (Tue, Sep 29) at 10:00 AM", times: [due] });
-  assert.deepEqual(plugin.describe!({ kind: "note", title: "buy milk" }, ctx), { description: "save the note “buy milk”", times: [] });
-  assert.deepEqual(plugin.describe!({ kind: "done", id: 2 }, ctx), { description: "mark #2 “call mom” as done", times: [] });
+    { description: "remind you about “call mom” tomorrow (Tue, Sep 29) at 10:00 AM", times: [due], changes: true });
+  assert.deepEqual(plugin.describe!({ kind: "note", title: "buy milk" }, ctx), { description: "save the note “buy milk”", times: [], changes: true });
+  assert.deepEqual(plugin.describe!({ kind: "done", id: 2 }, ctx), { description: "mark #2 “call mom” as done", times: [], changes: true });
   assert.deepEqual(plugin.describe!({ kind: "snooze", id: 1, minutes: 20 }, ctx),
-    { description: "snooze #1 “stretch” until today (Mon, Sep 28) at 9:20 AM", times: [epoch + 20 * 60_000] });
-  assert.deepEqual(plugin.describe!({ kind: "done", id: null }, ctx), { description: "ask which reminder you mean", times: [] });
-  assert.deepEqual(plugin.describe!({ kind: "list" }, ctx), { description: "show your active reminders", times: [] });
+    { description: "snooze #1 “stretch” until today (Mon, Sep 28) at 9:20 AM", times: [epoch + 20 * 60_000], changes: true });
+  assert.deepEqual(plugin.describe!({ kind: "done", id: null }, ctx), { description: "ask which reminder you mean", times: [], changes: false });
+  assert.deepEqual(plugin.describe!({ kind: "list" }, ctx), { description: "show your active reminders", times: [], changes: false });
 });
 
 test("conversational reminder messages invite a plain answer instead of command syntax", () => {

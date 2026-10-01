@@ -1,6 +1,6 @@
 import type { Thresholds, Turn, TurnContext, Understander } from "./contracts.js";
 import { CONSOLE_CONTACT, object as record } from "./config.js";
-import { gate, type Gate } from "./conversation.js";
+import { decide, type Gate } from "./conversation.js";
 import { optionId, routeCatalog } from "./host.js";
 import { builtinPlugins } from "./plugins/index.js";
 
@@ -30,7 +30,7 @@ export function parseCases(value: unknown): EvalCase[] {
 }
 
 /**
- * Runs Jev understanding over labelled cases and applies the same gate as production. The key safety number is
+ * Runs Jev understanding over labelled cases and applies the same decision as production, compound markers included. The key safety number is
  * confidentWrongActions: messages that would go on to prepare a change for the wrong option.
  */
 export async function evaluate(cases: EvalCase[], understander: Understander,
@@ -45,7 +45,7 @@ export async function evaluate(cases: EvalCase[], understander: Understander,
     const got = u ? optionId(u.route) : null;
     const flagsCorrect = !u || ((c.outbound === null || (u.outbound >= 0.5) === c.outbound) && (c.compound === null || u.multiAction === c.compound));
     rows.push({ text: c.text, expected: c.label, got, confidence: u?.confidence ?? null,
-      gate: u ? gate(u, policy.thresholds, policy.routes).kind : "error", correct: got === c.label, flagsCorrect });
+      gate: u ? decide(u, c.text, policy.thresholds, policy.routes).kind : "error", correct: got === c.label, flagsCorrect });
   }
   return { rows, total: rows.length, correct: rows.filter(r => r.correct).length, flagErrors: rows.filter(r => !r.flagsCorrect).length,
     confidentWrongActions: rows.filter(r => r.gate === "act" && !r.correct).length };

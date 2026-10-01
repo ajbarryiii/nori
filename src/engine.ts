@@ -2,7 +2,7 @@ import type { ActionPlugin, Budget, OutboxItem, Clarification, Command, CommandA
   Message, MessagePage, MessageTransport, RouteCatalog, RoutingDecision, Runtime, RuntimeConfig, RuntimeEvents, SendOutcome, Task, TaskState,
   TurnContext, TurnOutcome, Understanding, WaitingFor } from "./contracts.js";
 import { normalizeHandle, object, record } from "./config.js";
-import { gate, type Gate } from "./conversation.js";
+import { decide } from "./conversation.js";
 import { checkPlugins, isClarification, PluginHost, type DispatchSource } from "./host.js";
 import { inQuietHours, isCompound, localDay, parseEngineCommand, type EngineCommand } from "./parser.js";
 import { builtinPlugins } from "./plugins/index.js";
@@ -130,9 +130,9 @@ export class Engine {
         if (message.rowId <= cursor || !this.authorized(contact, message) || this.store.hasMessage(message.guid)) continue;
         // A message behind one still being understood waits its turn, in any mode, so replies keep the conversation's order.
         // Controls that stop activity are the exception: a running job must not keep acting while a model call finishes.
-        const control = parseEngineCommand(message.text)?.kind;
         if (this.store.hasPendingMessages(contact.id)) {
-          if (control !== "stop" && control !== "cancel" && control !== "deny") { this.store.addMessage(contact.id, message, "pending"); continue; }
+          const control = parseEngineCommand(message.text);
+          if (!control || !this.stopsNow(contact, control)) { this.store.addMessage(contact.id, message, "pending"); continue; }
           // A control that overtakes earlier messages answers no prompt: those messages may still be answering one.
           this.store.addMessage(contact.id, message); this.dispatch(contact, message); continue;
         }
@@ -206,6 +206,21 @@ export class Engine {
     if (asking.length === 1) { reply(this.followUp(contact, asking[0]!, message.text, message.sentAt)); return true; }
     if (asking.length > 1) { reply(`Which job is that for? Reply ${asking.map(x => `‘#${x.number} …’`).join(" or ")}.`); return true; }
     return false;
+  }
+
+  /**
+   * Whether a control would stop something right now, so it may overtake earlier pending messages: `stop` with a job
+   * running, `cancel #n` with job #n open, or `deny A<code>` with that approval pending. Otherwise it waits its turn, so it
+   * still applies to what those messages create.
+   */
+  private stopsNow(contact: Contact, command: EngineCommand): boolean {
+    const tasks = this.store.tasks(contact.id);
+    switch (command.kind) {
+      case "stop": return tasks.some(x => this.active.has(x.id));
+      case "cancel": return tasks.some(x => x.number === command.id && OPEN.includes(x.state));
+      case "deny": return command.code !== null && this.store.approvals(contact.id).some(x => x.id === command.code && x.status === "pending");
+      default: return false;
+    }
   }
 
   /** The contact's jobs waiting on a runtime question that has been delivered, with when its send began. */
@@ -540,7 +555,7 @@ export class Engine {
       catalog: this.host.catalog(contact, { conversational: true }), summary: this.summaries(contact),
       jobs: this.store.tasks(contact.id).filter(x => OPEN.includes(x.state)).slice(0, 5).map(x => ({ number: x.number, text: x.text, state: x.state })),
       // Only what the contact could have seen when they sent the message.
-      turns: this.store.recentTurns(contact.id, this.clock() - TURN_WINDOW_MS, TURN_LIMIT, item.sentAt),
+      turns: this.store.recentTurns(contact.id, item.sentAt - TURN_WINDOW_MS, TURN_LIMIT, item.sentAt),
       paused: pause === "all" || pause === "nudges" ? pause : "none" };
   }
 
@@ -548,7 +563,7 @@ export class Engine {
   private async plan(contact: Contact, item: PendingMessage, context: TurnContext, u: Understanding, conversation: ConversationPort,
     signal: AbortSignal): Promise<Plan> {
     // A second instruction is never truncated into a simpler action, whatever Jev answered.
-    const decided: Gate = isCompound(item.text) ? { kind: "job" } : gate(u, this.config.jev!.thresholds, this.config.jev!.routes);
+    const decided = decide(u, item.text, this.config.jev!.thresholds, this.config.jev!.routes);
     switch (decided.kind) {
       case "job": return { kind: "job", decision: u };
       case "chat": return { kind: "chat" };
@@ -659,7 +674,12 @@ export class Engine {
           }
           try { this.store.savepoint(() => this.host.invoke(plan.plugin, { ...source, capture }, ctx => plan.plugin.handle(plan.command, ctx))); }
           catch { this.retain(source, item.text, `${id}: handler error`); return; }
-          if (capture.length) say("result", capture.join("\n"), plan.account.times);
+          if (!capture.length) return;
+          const text = capture.join("\n");
+          // A query's reply is an answer: it goes out exactly as written.
+          if (plan.account.changes) { say("result", text, plan.account.times); return; }
+          this.enqueue(source, key, text);
+          if (text.includes("?")) this.addPrompt(contact.id, key);
         }
       }
     });

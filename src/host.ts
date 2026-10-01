@@ -216,8 +216,9 @@ export class PluginHost {
   describe(plugin: ActionPlugin, source: DispatchSource, command: Command): CommandAccount {
     const account: unknown = this.invoke(plugin, source, ctx => plugin.describe!(command, ctx), false);
     if (!record(account) || typeof account.description !== "string" || !account.description.trim() || account.description.length > 500
-      || !Array.isArray(account.times) || account.times.some(x => !Number.isSafeInteger(x))) throw new Error("Invalid command account.");
-    return { description: account.description.trim(), times: account.times as number[] };
+      || !Array.isArray(account.times) || account.times.some(x => !Number.isSafeInteger(x)) || typeof account.changes !== "boolean")
+      throw new Error("Invalid command account.");
+    return { description: account.description.trim(), times: account.times as number[], changes: account.changes };
   }
 
   private entry(plugin: ActionPlugin) { return this.entries.find(entry => entry.plugin === plugin)!; }

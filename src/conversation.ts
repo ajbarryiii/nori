@@ -2,6 +2,7 @@ import type { ConversationPort, Draft, ExtractRequest, Judge, LanguageModel, Thr
   Understanding } from "./contracts.js";
 import { object as record } from "./config.js";
 import { optionId } from "./host.js";
+import { isCompound } from "./parser.js";
 import { clockText, localNow, localStamp, mentionsClock, mentionsDate, mentionsDay, shortWhen, statesOnly } from "./time.js";
 
 const MAX_REPLY = 700;
@@ -36,6 +37,11 @@ export type Gate =
   | { kind: "status" }
   /** Prepare a change by a plugin or the engine (`pause`, `resume`, `cancel`, `continue`). It still needs the agreement check. */
   | { kind: "act"; option: string };
+
+/** The whole decision for a message: explicit compound markers keep it whole as a job, whatever Jev answered; otherwise `gate`. */
+export function decide(u: Understanding, text: string, thresholds: Thresholds, routes: Readonly<Record<string, number>>): Gate {
+  return isCompound(text) ? { kind: "job" } : gate(u, thresholds, routes);
+}
 
 /** The routing policy. Jev supplies calibrated probabilities; code decides what happens next. */
 export function gate(u: Understanding, thresholds: Thresholds, routes: Readonly<Record<string, number>>): Gate {

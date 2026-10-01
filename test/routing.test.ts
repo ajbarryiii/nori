@@ -206,7 +206,7 @@ test("plugins written as classes keep their interpret and describe hooks in cata
     migrate() {}
     match() { return null; }
     async interpret() { return null; }
-    describe() { return { description: "add a note", times: [] }; }
+    describe() { return { description: "add a note", times: [], changes: true }; }
     handle() {}
   }
   const store = new Store(":memory:"); t.after(() => store.close());

@@ -81,9 +81,9 @@ const routeOf = (label: string): Route => label === "reminders" ? { kind: "actio
 test("routing evaluation applies the production gate and counts confident wrong changes", async () => {
   const cases = parseCases([{ text: "remind me to call mom at 5", label: "reminders" }, { text: "thanks!", label: "chat" },
     { text: "email Sam the notes", label: "runtime", outbound: true }, { text: "done", label: "reminders", tracking: ["#3: stretch"],
-      turns: [{ from: "nori", text: "Reminder: stretch (#3)." }] }]);
+      turns: [{ from: "nori", text: "Reminder: stretch (#3)." }] }, { text: "remind me to call mom in an hour; add eggs to my list", label: "runtime" }]);
   const answers: Record<string, [string, number]> = { "remind me to call mom at 5": ["reminders", 0.95], "thanks!": ["pause", 0.9],
-    "email Sam the notes": ["runtime", 0.7], done: ["reminders", 0.9] };
+    "email Sam the notes": ["runtime", 0.7], done: ["reminders", 0.9], "remind me to call mom in an hour; add eggs to my list": ["reminders", 0.95] };
   const seen: TurnContext[] = [];
   const understander: Understander = { understand: async (c: TurnContext): Promise<Understanding> => {
     seen.push(c); const [label, confidence] = answers[c.text]!;
@@ -92,8 +92,9 @@ test("routing evaluation applies the production gate and counts confident wrong 
   } };
   const report = await evaluate(cases, understander, { thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 }, routes: { reminders: 0.8 } },
     { timezone: "UTC", now: epoch });
-  assert.equal(report.total, 4); assert.equal(report.correct, 3);
-  assert.deepEqual(report.rows.map(x => x.gate), ["act", "act", "job", "act"]);
+  assert.equal(report.total, 5); assert.equal(report.correct, 3);
+  // As in production, explicit compound markers keep a message whole as a job whatever Jev answers.
+  assert.deepEqual(report.rows.map(x => x.gate), ["act", "act", "job", "act", "job"]);
   assert.equal(report.confidentWrongActions, 1);
   assert.equal(report.flagErrors, 0);
   assert.deepEqual(seen[3]!.summary, ["#3: stretch"]); assert.deepEqual(seen[3]!.turns.map(x => x.from), ["nori"]);
