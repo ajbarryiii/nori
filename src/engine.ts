@@ -698,8 +698,9 @@ export class Engine {
   private startTurn(runtime: Runtime, limits: RuntimeConfig, tried: Set<number>): Promise<void> | "held" | null {
     const contacts = this.activeContacts().filter(c => this.runtimeFor(c));
     // The oldest job the daily limits allow: a new job blocked by the task limit does not hold up jobs resuming a thread.
+    // A contact's jobs wait while one of their messages is pending: it may be an instruction for the job.
     const task = this.store.tasks().find(x => x.state === "routed" && !tried.has(x.id) && contacts.some(c => c.id === x.contactId)
-      && !this.dailyLimitReached(x.threadId === null));
+      && !this.dailyLimitReached(x.threadId === null) && !this.store.hasPendingMessages(x.contactId));
     if (!task) return null;
     tried.add(task.id);
     const contact = contacts.find(c => c.id === task.contactId)!;

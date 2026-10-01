@@ -31,9 +31,10 @@ const CONVERSATIONAL: readonly CatalogOption[] = [
  * owner, continue, and clarify. A conversational catalog offers only plugins that can also describe their commands,
  * the runtime to everyone (members' jobs stay queued), and the engine's own conversational options.
  */
-export function routeCatalog(plugins: readonly ActionPlugin[], contact: Contact, options: { conversational?: boolean } = {}): RouteCatalog {
+export function routeCatalog(plugins: readonly ActionPlugin[], contact: Contact, options: { conversational?: boolean } = {},
+  manifestOf: (plugin: ActionPlugin) => Readonly<PluginManifest> = plugin => plugin.manifest): RouteCatalog {
   const conversational = options.conversational ?? false;
-  const actions = plugins.filter(plugin => plugin.interpret && (!conversational || plugin.describe)).map(plugin => plugin.manifest)
+  const actions = plugins.filter(plugin => plugin.interpret && (!conversational || plugin.describe)).map(manifestOf)
     .map(({ id, criteria, label }): CatalogOption => ({ id, criteria, route: { kind: "action", pluginId: id }, label: label ?? `use ${id}` }));
   const all = conversational ? [...actions, RUNTIME, CONTINUE, CLARIFY, ...CONVERSATIONAL]
     : [...actions, ...(contact.role === "owner" ? [RUNTIME] : []), CONTINUE, CLARIFY];
@@ -163,8 +164,8 @@ export class PluginHost {
 
   /** Routing options this contact may use, built from the registered manifests. Runtimes are owner-only by default. */
   catalog(contact: Contact, options: { conversational?: boolean } = {}): RouteCatalog {
-    const plugins = this.permitted(contact).map(plugin => ({ ...plugin, manifest: this.manifest(plugin) }));
-    return routeCatalog(plugins, contact, options);
+    // The registered snapshot of each manifest, with the plugin itself so hooks defined on a class prototype are seen.
+    return routeCatalog(this.permitted(contact), contact, options, plugin => this.manifest(plugin));
   }
 
   validate(plugin: ActionPlugin, value: unknown): Command | null { return validateCommand(plugin.schema, value); }

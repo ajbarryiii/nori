@@ -123,7 +123,8 @@ export async function runService(options: { config: Config; store: Store; transp
         }
       }
       await wait(config.pollMs, signal);
-      if (options.until?.() && idle()) break;
+      // A failure recorded meanwhile, such as an uncertain send, is thrown at the top of the loop instead.
+      if (options.until?.() && idle() && !failure) break;
     }
   } catch (error) { if (!signal.aborted) throw error; }
   finally {

@@ -9,7 +9,7 @@ import { localDay } from "../src/parser.js";
 import { runService } from "../src/service.js";
 import { Store } from "../src/store.js";
 import { StoreMeter } from "../src/usage.js";
-import type { Config, ConversationPort, Draft, ExtractRequest, Route, TurnContext, Understanding } from "../src/contracts.js";
+import type { Config, ConversationPort, Draft, ExtractRequest, Route, Runtime, TurnContext, Understanding } from "../src/contracts.js";
 import { config, enroll, epoch, FakeTransport, jevConfig, member, message, messageFrom, owner, page, reminders } from "./helpers.js";
 
 type Answer<T> = T | ((context: TurnContext, signal: AbortSignal) => Promise<T>);
@@ -559,4 +559,37 @@ test("with until, the service stops only once routing has finished and its repli
   assert.equal(routed, true);
   assert.equal(reminders(store)[0]?.title, "stretch");
   assert.deepEqual(transport.sent.map(x => x.slice(0, 16)), ["Saved job #1. It", "Saved locally #1"]);
+});
+
+test("a contact's job does not start while one of their messages is pending, so a follow-up reaches it first", async t => {
+  const runtimeConfig = { codexPath: "/usr/local/bin/codex", model: null, workspaceDir: "/tmp/nori-work",
+    budget: { minutes: 30, turns: 8, toolCalls: 40, tokens: 1_000_000 }, daily: { tasks: 5, tokens: 5_000_000 }, approvalMinutes: 60, maxJobs: 1 };
+  const started: string[] = [];
+  const runtime: Runtime = { manifest: { id: "codex", computerUse: "unverified", ownerOnly: true },
+    start: async task => { started.push(task.text); return { status: "completed", message: "Done.", evidence: ["Checked"] }; },
+    resume: async () => ({ status: "interrupted" }), cancel: async () => {}, close: async () => {}, shutdown: async () => {}, halted: null };
+  const store = new Store(":memory:"); t.after(() => store.close()); enroll(store);
+  const conversation = new FakeConversation();
+  const engine = new Engine({ ...conversational, contacts: [owner], runtime: runtimeConfig }, store, new FakeTransport(),
+    { clock: () => epoch, conversation, runtime });
+  let release!: (text: string | null) => void;
+  conversation.understandings.push(understood("runtime"));
+  conversation.phrases.push(() => new Promise(resolve => { release = resolve; }));
+  engine.acceptPage("owner", page([message("research headphones"), message("#1 only compare wired models", 2)]));
+  const processing = engine.processPending();
+  while (!release) await tick();
+  await engine.routeTasks(null); await engine.runTasks();
+  assert.deepEqual(started, []);
+  release(null); await processing;
+  await engine.routeTasks(null); await engine.runTasks();
+  assert.equal(started.length, 1);
+  assert.match(started[0]!, /research headphones[\s\S]*only compare wired models/);
+});
+
+test("with until, a delivery failure still rejects instead of ending as idle", async t => {
+  const store = new Store(":memory:"); t.after(() => store.close()); enroll(store);
+  const transport = new FakeTransport(); transport.outcomes.push({ status: "uncertain", reason: "lost" });
+  transport.readAfter = async (_conversation, cursor) => cursor === 0 ? page([message("status")]) : page([], cursor);
+  await assert.rejects(runService({ config, store, transport, checkIdentity: () => {}, signal: new AbortController().signal, until: () => true,
+    wait: async () => { await tick(); } }), /uncertain/i);
 });

@@ -540,7 +540,9 @@ export class CodexModel implements LanguageModel {
       // response, and interrupt it so it stops using the plan's allowance.
       if (rpc && threadId && status === null) {
         const live = rpc; const thread = threadId;
-        const interrupt = (id: string) => { live.request("turn/interrupt", { threadId: thread, turnId: id }).catch(() => {}); };
+        // A turn that cannot be interrupted is stopped by closing its connection.
+        const abandon = () => { if (this.rpc === live) this.rpc = null; live.close(); };
+        const interrupt = (id: string) => { live.request("turn/interrupt", { threadId: thread, turnId: id }).catch(abandon); };
         const noticed = turnId ?? events.map(e => e.method === "turn/started" && e.params.threadId === thread ? text(record(e.params.turn)?.id) : null)
           .find((id): id is string => id !== null) ?? null;
         if (noticed) interrupt(noticed);
@@ -559,9 +561,7 @@ export class CodexModel implements LanguageModel {
             if (id && !found) { found = true; interrupt(id); }
           }, () => {
             this.listeners.delete(watch);
-            if (found) return;
-            if (this.rpc === live) this.rpc = null;
-            live.close();
+            if (!found) abandon();
           });
         }
       }

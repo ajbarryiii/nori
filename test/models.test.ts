@@ -294,3 +294,16 @@ test("a Codex turn that starts only after its start request failed is interrupte
   fail(); await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(failed.made[0]!.closed, true);
 });
+
+test("a Codex responder turn that cannot be interrupted takes its connection down with it", async () => {
+  const stuck = connector(() => {});
+  const model = new CodexModel({ model: "gpt-6-luna", timeoutMs: 50, cwd: "/tmp", connect: handlers => {
+    const rpc = stuck.connect(handlers); const original = rpc.request.bind(rpc);
+    rpc.request = async (method, params) => method === "turn/interrupt" ? Promise.reject(new Error("RPC provider rejected the request."))
+      : original(method, params);
+    return rpc;
+  } });
+  assert.equal(await model.generate(request, signal), null);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(stuck.made[0]!.closed, true);
+});
