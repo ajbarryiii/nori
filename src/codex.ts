@@ -544,7 +544,26 @@ export class CodexModel implements LanguageModel {
         const noticed = turnId ?? events.map(e => e.method === "turn/started" && e.params.threadId === thread ? text(record(e.params.turn)?.id) : null)
           .find((id): id is string => id !== null) ?? null;
         if (noticed) interrupt(noticed);
-        else starting?.then(response => { const id = text(record(record(response)?.turn)?.id); if (id) interrupt(id); }, () => {});
+        else if (starting) {
+          // Keep watching until the start settles. A start that fails without naming its turn leaves the server's state unknown,
+          // so the connection is closed, which stops anything it started.
+          let found = false;
+          const watch = (method: string, params: Record<string, unknown>) => {
+            const id = method === "turn/started" && params.threadId === thread ? text(record(params.turn)?.id) : null;
+            if (id && !found) { found = true; this.listeners.delete(watch); interrupt(id); }
+          };
+          this.listeners.add(watch);
+          starting.then(response => {
+            this.listeners.delete(watch);
+            const id = text(record(record(response)?.turn)?.id);
+            if (id && !found) { found = true; interrupt(id); }
+          }, () => {
+            this.listeners.delete(watch);
+            if (found) return;
+            if (this.rpc === live) this.rpc = null;
+            live.close();
+          });
+        }
       }
       return null;
     } finally {

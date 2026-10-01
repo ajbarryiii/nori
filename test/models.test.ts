@@ -263,3 +263,34 @@ test("a Codex turn confirmed only after a timeout is still interrupted", async (
   assert.equal(await noticedModel.generate(request, signal), null);
   assert.ok(noticed.made[0]!.calls.some(x => x.method === "turn/interrupt" && x.params.turnId === "turn-noticed"));
 });
+
+test("a Codex turn that starts only after its start request failed is interrupted, or its connection closed", async () => {
+  // The start notification arrives after the deadline, while the start request is still outstanding.
+  let notify!: () => void; const watched = connector(() => {});
+  const watchedModel = new CodexModel({ model: "gpt-6-luna", timeoutMs: 50, cwd: "/tmp", connect: handlers => {
+    const rpc = watched.connect(handlers); const original = rpc.request.bind(rpc);
+    rpc.request = async (method, params) => {
+      if (method !== "turn/start") return original(method, params);
+      rpc.calls.push({ method, params });
+      notify = () => rpc.emit("turn/started", { threadId: params.threadId, turn: { id: "turn-after" } });
+      return new Promise<unknown>(() => {});
+    };
+    return rpc;
+  } });
+  assert.equal(await watchedModel.generate(request, signal), null);
+  notify();
+  assert.ok(watched.made[0]!.calls.some(x => x.method === "turn/interrupt" && x.params.turnId === "turn-after"));
+  // The start request itself fails (an RPC timeout) without any turn being named: the connection is closed.
+  let fail!: () => void; const failed = connector(() => {});
+  const failedModel = new CodexModel({ model: "gpt-6-luna", timeoutMs: 50, cwd: "/tmp", connect: handlers => {
+    const rpc = failed.connect(handlers); const original = rpc.request.bind(rpc);
+    rpc.request = async (method, params) => method === "turn/start"
+      ? new Promise<unknown>((_resolve, reject) => { rpc.calls.push({ method, params }); fail = () => reject(new Error("RPC request timed out.")); })
+      : original(method, params);
+    return rpc;
+  } });
+  assert.equal(await failedModel.generate(request, signal), null);
+  assert.equal(failed.made[0]!.closed, false);
+  fail(); await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(failed.made[0]!.closed, true);
+});

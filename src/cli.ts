@@ -2,7 +2,6 @@
 import { accessSync, constants, readFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { assemble, evalUnderstander, type Assembly } from "./assemble.js";
@@ -42,17 +41,6 @@ function describeModels(config: Config): string {
     : config.jev ? "Grammar and template replies; Jev routes queued jobs." : "Grammar and template replies; no models.";
 }
 
-/** Waits until every typed line is ingested, understood, and answered, so piped input exits cleanly. */
-async function drained(store: Store, transport: ConsoleTransport, signal: AbortSignal): Promise<void> {
-  const deadline = Date.now() + 120_000;
-  while (!signal.aborted && Date.now() < deadline) {
-    const busy = (store.enrollment(CONSOLE_CONTACT.id)?.cursor ?? 0) < transport.lastRowId || store.hasPendingMessages()
-      || store.outbox().some(x => x.kind === "reply" && ["drafting", "pending", "sending"].includes(x.status));
-    if (!busy) return;
-    await delay(100);
-  }
-}
-
 async function chat(configPath: string | undefined, dataDirArg: string | undefined): Promise<void> {
   const dataDir = resolve(dataDirArg ?? join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "nori-console"));
   const config = parseConsoleConfig(configPath ? readJson(configPath) : {}, { dataDir, username: userInfo().username });
@@ -67,15 +55,16 @@ async function chat(configPath: string | undefined, dataDirArg: string | undefin
     transport = new ConsoleTransport({ input: process.stdin, output: process.stdout, startRowId: store.enrollment(CONSOLE_CONTACT.id)!.cursor });
     const stop = () => controller.abort();
     const [s, t] = [store, transport];
-    void t.ended.then(async () => {
-      try { await drained(s, t, controller.signal); } catch { /* The service already stopped and closed the store. */ }
-      controller.abort();
-    });
+    // At the end of input the service stops once every typed line is read, understood, routed, and answered. A model
+    // that never answers cannot keep it running for more than two minutes.
+    let ended = false;
+    void t.ended.then(() => { ended = true; setTimeout(stop, 120_000).unref(); });
+    const done = () => ended && (s.enrollment(CONSOLE_CONTACT.id)?.cursor ?? 0) >= t.lastRowId;
     process.once("SIGINT", stop);
     console.log(`Nori console (development only; iMessage is not used). ${describeModels(config)}\nState: ${join(config.dataDir, "console.sqlite")}. Type a message; Ctrl-D or Ctrl-C quits.`);
     try {
       await runService({ config, store, transport, checkIdentity: () => {}, signal: controller.signal,
-        router: models.router, conversation: models.conversation });
+        router: models.router, conversation: models.conversation, until: done });
     } finally { process.removeListener("SIGINT", stop); }
   } finally { controller.abort(); transport?.close(); models?.close(); store?.close(); release(); }
 }

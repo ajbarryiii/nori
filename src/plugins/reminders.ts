@@ -291,7 +291,9 @@ export const reminders: ActionPlugin = {
   },
   summary(ctx) {
     const items = active(ctx);
-    return [`${items.length} active tasks.`, ...items.slice(0, 5).map(x => `#${x.id}: ${x.title}`),
+    const when = (x: Reminder) => x.nextAt === null ? "" : ` (next reminder ${formatTime(x.nextAt, ctx.timezone)}${
+      x.dueAt !== null && x.dueAt !== x.nextAt ? `; due ${formatTime(x.dueAt, ctx.timezone)}` : ""})`;
+    return [`${items.length} active tasks.`, ...items.slice(0, 5).map(x => `#${x.id}: ${x.title}${when(x)}`),
       ...(items.length > 5 ? [`Plus ${items.length - 5} more tasks.`] : [])];
   },
 };

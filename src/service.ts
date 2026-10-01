@@ -51,9 +51,14 @@ export async function catchUp(store: Store, engine: Engine, transport: MessageTr
   return complete;
 }
 
+/**
+ * Runs until the signal aborts or a failure stops it. With `until`, it also stops once `until()` holds and the service is
+ * idle: caught up, with nothing being sent, routed, understood, or run, no pending messages, no tasks waiting to be routed,
+ * and no unsent replies. The development console uses this to exit cleanly at the end of its input.
+ */
 export async function runService(options: { config: Config; store: Store; transport: MessageTransport;
   checkIdentity: () => void; signal: AbortSignal; router?: IntentRouter | undefined; plugins?: readonly ActionPlugin[]; runtime?: Runtime;
-  conversation?: ConversationPort | undefined; wait?: (ms: number, signal: AbortSignal) => Promise<void> }): Promise<void> {
+  conversation?: ConversationPort | undefined; until?: () => boolean; wait?: (ms: number, signal: AbortSignal) => Promise<void> }): Promise<void> {
   const { config, store, transport, checkIdentity, signal, router, runtime, conversation } = options;
   const wait = options.wait ?? (async (ms, signal) => { await delay(ms, undefined, { signal }); });
   let caughtUp = false; let stopped = false; let failure: unknown;
@@ -67,6 +72,9 @@ export async function runService(options: { config: Config; store: Store; transp
   // One entry per runTasks call that still has turns running; each poll may start more while free slots remain.
   const working = new Set<Promise<void>>();
   const canDispatch = () => !stopped && !signal.aborted && caughtUp && !failure;
+  const idle = () => caughtUp && !sending && !routing && !understanding.size && !working.size && !store.hasPendingMessages()
+    && !((router || (runtime && config.runtime)) && store.unroutedTasks().length)
+    && !store.outbox().some(x => x.kind === "reply" && ["drafting", "pending", "sending"].includes(x.status));
   const guarded: MessageTransport = {
     readiness: () => transport.readiness(), readAfter: (conversation, cursor) => transport.readAfter(conversation, cursor),
     close: () => transport.close(),
@@ -115,6 +123,7 @@ export async function runService(options: { config: Config; store: Store; transp
         }
       }
       await wait(config.pollMs, signal);
+      if (options.until?.() && idle()) break;
     }
   } catch (error) { if (!signal.aborted) throw error; }
   finally {

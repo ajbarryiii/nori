@@ -295,3 +295,10 @@ test("an implicit reminder reference is bound to one reminder or becomes a quest
   assert.match((await plugin.interpret!("could you snooze 20m?", two.ctx) as { clarify: string }).clarify, /Which reminder/);
   assert.deepEqual(await plugin.interpret!("snooze #2 10m please", two.ctx), { kind: "snooze", id: 2, minutes: 10 });
 });
+
+test("the status summary gives each reminder's next time and, when snoozed, its deadline", () => {
+  const snoozed: Reminder = { id: 2, title: "stretch", dueAt: epoch, nextAt: epoch + 20 * 60_000, status: "active" };
+  const { ctx } = talking([item(1, "go to dentist", at("2026-09-29T17:00:00Z")), snoozed, item(3, "buy milk")], null);
+  assert.deepEqual(plugin.summary!(ctx), ["3 active tasks.", "#1: go to dentist (next reminder Sep 29, 10:00 AM PDT)",
+    "#2: stretch (next reminder Sep 28, 9:20 AM PDT; due Sep 28, 9:00 AM PDT)", "#3: buy milk"]);
+});

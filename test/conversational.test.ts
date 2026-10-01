@@ -542,3 +542,21 @@ test("a Nori message whose send has begun is part of the conversation its answer
   store.claimOutgoing(epoch + 1_000, () => true);
   assert.deepEqual(store.recentTurns("owner", epoch - 1, 8).map(x => [x.from, x.at]), [["nori", epoch + 1_000]]);
 });
+
+test("with until, the service stops only once routing has finished and its replies are sent", async t => {
+  const store = new Store(":memory:"); t.after(() => store.close()); enroll(store);
+  const transport = new FakeTransport();
+  transport.readAfter = async (_conversation, cursor) => cursor === 0
+    ? page([message("please remind me to stretch in 2 hours", 1, { sentAt: Date.now() })]) : page([], cursor);
+  let routed = false;
+  const router = { classify: async () => {
+    await new Promise(resolve => setTimeout(resolve, 30)); routed = true;
+    return { model: "jev-test", catalogVersion: "v", route: { kind: "action", pluginId: "reminders" } as Route, confidence: 1, probabilities: {},
+      multiAction: false };
+  } };
+  await runService({ config: { ...config, jev: { ...jevConfig, routes: { reminders: 0.9 } } }, store, transport, checkIdentity: () => {},
+    signal: new AbortController().signal, router, until: () => true, wait: async () => { await tick(); } });
+  assert.equal(routed, true);
+  assert.equal(reminders(store)[0]?.title, "stretch");
+  assert.deepEqual(transport.sent.map(x => x.slice(0, 16)), ["Saved job #1. It", "Saved locally #1"]);
+});
