@@ -1,18 +1,49 @@
 import { createHash } from "node:crypto";
-import type { ActionPlugin, Capability, Clarification, Command, CommandSchema, Config, Contact, FieldSchema, MessageContext, PluginContext,
-  PluginDb, PluginManifest, PluginState, RouteCatalog, RuntimeTool, ToolDefinition } from "./contracts.js";
+import type { ActionPlugin, Capability, Clarification, Command, CommandAccount, CommandSchema, Config, Contact, ExtractRequest, FieldSchema,
+  MessageContext, PluginContext, PluginDb, PluginManifest, PluginState, Route, RouteCatalog, RuntimeTool, ToolDefinition } from "./contracts.js";
 import { record } from "./config.js";
 import type { Store } from "./store.js";
 
-const RESERVED = new Set(["runtime", "continue", "clarify"]);
+const RESERVED = new Set(["runtime", "continue", "clarify", "chat", "status", "pause", "resume", "cancel"]);
 const CAPABILITIES = new Set<Capability>(["storage", "schedule", "network", "desktop"]);
 const MAX_REPLY = 10_000;
-const RUNTIME = { id: "runtime", route: { kind: "runtime" },
+type CatalogOption = RouteCatalog["options"][number];
+const RUNTIME = { id: "runtime", route: { kind: "runtime" }, label: "work on it as a job",
   criteria: "Needs research, reasoning, several steps, code, or work in an app or website, rather than one quick action." } as const;
-const CONTINUE = { id: "continue", route: { kind: "continue" },
+const CONTINUE = { id: "continue", route: { kind: "continue" }, label: "add it to an earlier job",
   criteria: "Adds to, changes, or asks about one of this contact's earlier requests that is still open." } as const;
-const CLARIFY = { id: "clarify", route: { kind: "clarify" },
+const CLARIFY = { id: "clarify", route: { kind: "clarify" }, label: "do something else",
   criteria: "The intended outcome or essential details are too unclear to act on." } as const;
+/** Options the engine handles itself, offered only in conversational catalogs. */
+const CONVERSATIONAL: readonly CatalogOption[] = [
+  { id: "chat", route: { kind: "chat" }, label: "just chat",
+    criteria: "A greeting, thanks, feelings, small talk, or a question Nori can answer from what it is tracking, without changing anything." },
+  { id: "status", route: { kind: "status" }, label: "show what I'm tracking",
+    criteria: "Asks what is on their list, what is due, or what Nori is tracking or working on for them." },
+  { id: "pause", route: { kind: "pause" }, label: "pause reminder messages", criteria: "Asks Nori to stop or hold its reminder messages for now." },
+  { id: "resume", route: { kind: "resume" }, label: "resume reminder messages",
+    criteria: "Asks Nori to start sending reminder messages again after a pause." },
+  { id: "cancel", route: { kind: "cancel" }, label: "cancel a job", criteria: "Asks to cancel, drop, or stop one of their open jobs." },
+];
+
+/**
+ * Routing options for a contact. The plain catalog offers permitted plugins with an interpret step, the runtime to the
+ * owner, continue, and clarify. A conversational catalog offers only plugins that can also describe their commands,
+ * the runtime to everyone (members' jobs stay queued), and the engine's own conversational options.
+ */
+export function routeCatalog(plugins: readonly ActionPlugin[], contact: Contact, options: { conversational?: boolean } = {},
+  manifestOf: (plugin: ActionPlugin) => Readonly<PluginManifest> = plugin => plugin.manifest): RouteCatalog {
+  const conversational = options.conversational ?? false;
+  const actions = plugins.filter(plugin => plugin.interpret && (!conversational || plugin.describe)).map(manifestOf)
+    .map(({ id, criteria, label }): CatalogOption => ({ id, criteria, route: { kind: "action", pluginId: id }, label: label ?? `use ${id}` }));
+  const all = conversational ? [...actions, RUNTIME, CONTINUE, CLARIFY, ...CONVERSATIONAL]
+    : [...actions, ...(contact.role === "owner" ? [RUNTIME] : []), CONTINUE, CLARIFY];
+  const digest = createHash("sha256").update(JSON.stringify(all.map(o => [o.id, o.criteria]))).digest("hex");
+  return { version: `catalog-${digest.slice(0, 12)}`, options: all };
+}
+
+/** The option id a route was chosen by: the plugin id for an action, otherwise the route kind. */
+export function optionId(route: Route): string { return route.kind === "action" ? route.pluginId : route.kind; }
 
 /** Where a dispatch came from. It scopes replies and timers and supplies the reference time. */
 export interface DispatchSource {
@@ -26,8 +57,10 @@ export interface DispatchSource {
   /** Set for timer dispatches, whose messages are held by pause-all and quiet hours. */
   timer: { id: number; revision: number } | null;
   sourceGuid: string | null;
-  /** When set, replies are collected here instead of enqueued. Tool calls use this to return their result. */
+  /** When set, replies are collected here instead of enqueued. Tool calls and conversational changes use this. */
   capture?: string[];
+  /** Set for a conversational interpret: the responder's extraction for this message. */
+  extract?: (request: ExtractRequest) => Promise<unknown>;
 }
 
 /** Fails closed on registry, allowlist, and Jev route mistakes before any plugin runs. */
@@ -95,7 +128,8 @@ function refusePromise(id: string, value: unknown): void {
 
 export class PluginHost {
   private readonly entries: ReadonlyArray<{ plugin: ActionPlugin; manifest: Readonly<PluginManifest>; tools: readonly ToolDefinition[] }>;
-  constructor(private readonly store: Store, plugins: readonly ActionPlugin[], private readonly timezone: string) {
+  constructor(private readonly store: Store, plugins: readonly ActionPlugin[], private readonly timezone: string,
+    private readonly conversational = false) {
     // Snapshot manifests and tools so a plugin cannot widen its roles or capabilities, or relax a tool's impact, later.
     this.entries = plugins.map(plugin => ({ plugin, manifest: Object.freeze(structuredClone(plugin.manifest)),
       tools: Object.freeze((plugin.tools ?? []).map(tool => Object.freeze({ ...tool }))) }));
@@ -128,13 +162,10 @@ export class PluginHost {
     return this.permitted(contact).flatMap(plugin => this.manifest(plugin).examples);
   }
 
-  /** Routing options this contact may use. Runtimes are owner-only by default. */
-  catalog(contact: Contact): RouteCatalog {
-    const actions = this.permitted(contact).filter(plugin => plugin.interpret).map(plugin => this.manifest(plugin))
-      .map(({ id, criteria }) => ({ id, criteria, route: { kind: "action", pluginId: id } as const }));
-    const options = [...actions, ...(contact.role === "owner" ? [RUNTIME] : []), CONTINUE, CLARIFY];
-    const digest = createHash("sha256").update(JSON.stringify(options.map(o => [o.id, o.criteria]))).digest("hex");
-    return { version: `catalog-${digest.slice(0, 12)}`, options };
+  /** Routing options this contact may use, built from the registered manifests. Runtimes are owner-only by default. */
+  catalog(contact: Contact, options: { conversational?: boolean } = {}): RouteCatalog {
+    // The registered snapshot of each manifest, with the plugin itself so hooks defined on a class prototype are seen.
+    return routeCatalog(this.permitted(contact), contact, options, plugin => this.manifest(plugin));
   }
 
   validate(plugin: ActionPlugin, value: unknown): Command | null { return validateCommand(plugin.schema, value); }
@@ -157,6 +188,9 @@ export class PluginHost {
     return plugin && definition ? { plugin, definition } : null;
   }
 
+  /** Whether contacts may write naturally. Plugins see it as `conversational`. */
+  get isConversational(): boolean { return this.conversational; }
+
   match(plugin: ActionPlugin, text: string, ctx: MessageContext): Command | Clarification | null {
     const result = plugin.match(text, ctx);
     refusePromise(this.manifest(plugin).id, result);
@@ -173,9 +207,18 @@ export class PluginHost {
     } finally { close(); }
   }
 
-  async interpret(plugin: ActionPlugin, source: DispatchSource, text: string): Promise<Command | Clarification> {
+  async interpret(plugin: ActionPlugin, source: DispatchSource, text: string): Promise<Command | Clarification | null> {
     const { ctx, close } = this.context(plugin, source, false);
     try { return await plugin.interpret!(text, ctx); } finally { close(); }
+  }
+
+  /** The plugin's account of a validated command, from a read-only context. Throws on a malformed account. */
+  describe(plugin: ActionPlugin, source: DispatchSource, command: Command): CommandAccount {
+    const account: unknown = this.invoke(plugin, source, ctx => plugin.describe!(command, ctx), false);
+    if (!record(account) || typeof account.description !== "string" || !account.description.trim() || account.description.length > 500
+      || !Array.isArray(account.times) || account.times.some(x => !Number.isSafeInteger(x)) || typeof account.changes !== "boolean")
+      throw new Error("Invalid command account.");
+    return { description: account.description.trim(), times: account.times as number[], changes: account.changes };
   }
 
   private entry(plugin: ActionPlugin) { return this.entries.find(entry => entry.plugin === plugin)!; }
@@ -202,7 +245,11 @@ export class PluginHost {
       nextId: (sequence: string) => { check("storage", true); return store.nextId(id, contactId, key(sequence)); },
     });
     const ctx: PluginContext = Object.freeze({
-      contact: source.contact, time: source.time, timezone: this.timezone, state,
+      contact: source.contact, time: source.time, timezone: this.timezone, conversational: this.conversational, state,
+      extract: source.extract ? (request: ExtractRequest) => {
+        check(null, false);
+        return source.extract!(request);
+      } : null,
       reply: (text: string) => {
         check(null, true);
         if (typeof text !== "string" || !text.trim() || text.length > MAX_REPLY) throw new Error(`Plugin ${id} sent an invalid reply.`);

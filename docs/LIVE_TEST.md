@@ -1,11 +1,12 @@
-# Live test in the `receipts` profile
+# Live test
 
-Step-by-step instructions for testing branch `feat/plugin-runtime` on the real assistant account. Run everything in the **`receipts` macOS profile**. Live commands refuse to run in any other account. `docs/RUNBOOK.md` has background on every step.
+Step-by-step instructions for testing Nori on a real Mac. Run everything in the **assistant account**: the dedicated macOS user account that `assistantUser` names. Live commands refuse to run in any other account. `docs/RUNBOOK.md` has background on every step.
 
-The goals are the plan's first two milestones:
+The goals:
 
 - **Reminders**: reminders work end to end over iMessage.
 - **Codex**: one Codex job is started, followed up, approved once, and completed over iMessage.
+- **Conversation**: natural messages are understood, confirmed when unsure, and answered.
 
 Keep notes of anything that differs from the expected results below.
 
@@ -15,7 +16,6 @@ Keep notes of anything that differs from the expected results below.
 mkdir -p ~/workspace/github.com && cd ~/workspace/github.com
 git clone https://github.com/ajbarryiii/nori.git
 cd nori
-git checkout feat/plugin-runtime
 ```
 
 Install Node 22.19 or newer for this account, for example with nvm (`nvm install 22 && nvm use`). Then:
@@ -53,11 +53,12 @@ open -e "$HOME/Library/Application Support/Nori/config.json"
 
 Edit the file:
 
+- `assistantUser`: this account's short name (`id -un`), and `dataDir`: this account's `~/Library/Application Support/Nori`. The example uses an account named `nori`.
 - `contacts[0].handles`: your handle from step 2.
 - `contacts[0].conversation.chatId` and `.chatGuid`: the chat `id` and `guid`. The placeholder `0` is deliberately invalid.
 - `imsgPath`: the absolute path from `command -v imsg`.
 - Check `timezone` and `quietHours`.
-- Leave `jev` and `runtime` as `null` for now.
+- Leave `jev`, `responder`, and `runtime` as `null` for now.
 
 ## 4. Reminders test
 
@@ -127,7 +128,7 @@ Expect no `uncertain` items in `outbox`. If any appear, check the Messages conve
 
 5. Run `node dist/cli.js doctor --config "$CFG"`. Expect `codexExecution: "configured; …"`.
 
-A Codex job can read any file this account can read, including Nori's state database. Keep personal files out of `receipts`.
+A Codex job can read any file this account can read, including Nori's state database. Keep personal files out of the assistant account.
 
 ## 6. Codex test
 
@@ -153,11 +154,48 @@ Start the service again: `node dist/cli.js run --config "$CFG"`. From your phone
 - `stop` while a job runs: expect `Stopped job #M. …`.
 - `deny A<code>` on an approval: the job continues without that command, or explains that it couldn't.
 
-## 7. What to report back
+## 7. Conversation test
+
+1. Store the API keys in this account's login Keychain. Each command prompts for the key:
+
+   ```sh
+   security add-generic-password -a "$USER" -s ai.nori.typesafe -w
+   security add-generic-password -a "$USER" -s ai.nori.openrouter -w
+   ```
+
+   To use the ChatGPT plan through Codex instead of OpenRouter, skip the second key; the Codex sign-in from step 5 is used.
+
+2. Replace `"jev": null` and `"responder": null` in the config:
+
+   ```json
+   "jev": { "model": "jev-1.13.0", "dailyLimit": 1000, "routes": { "reminders": 0.8 } },
+   "responder": { "provider": "openrouter", "model": "xiaomi/mimo-v2.6-flash" }
+   ```
+
+   or, for Codex, `"responder": { "provider": "codex", "model": "gpt-6-luna" }` (it uses `runtime.codexPath`).
+3. Run `node dist/cli.js doctor --config "$CFG"`. Expect the `jev` and `replies` lines to report the keys as present, or the Codex executable as found.
+4. Start the service and send these from your phone:
+
+| Send | Expect |
+| --- | --- |
+| `can you remind me to call mom tomorrow morning` | A short reply naming #n, tomorrow, and 9 AM. `list` shows it. |
+| `remind me to water the plants` | `When should I remind you?`, or a phrasing of it. |
+| `at 6 tonight` | A reminder for the plants at 6 PM today. |
+| `push the mom one to the afternoon` | A snooze until 3 PM tomorrow, or `Did you mean: …?`. If asked, reply `yes`. |
+| `thanks!` | A friendly reply that claims nothing was done. |
+| `what's on my plate?` | A summary that names your reminders by number. |
+| `done #1` | `Completed #1: …` immediately, with no model involved. |
+
+The reminder message itself now reads `Reminder: … (#n). Tell me when it's done, or ask me to snooze it.`. Reply `done` in your own words, for example `did it`. While Nori is still working out a reply, a due reminder for you waits.
+
+Run `node dist/cli.js status --config "$CFG"` after stopping the service: `modelUsageToday` shows the day's calls per provider, and `pendingMessages` should be 0.
+
+## 8. What to report back
 
 - Which expectations above failed, with the exact reply text you saw.
 - Whether the approval request and the tool-created reminder worked. These are the parts not yet verified against a real Codex model.
 - After the restart test, whether the resumed job could still use Nori's tools (for example `list` its reminders). This checks whether Codex keeps dynamic tools after a thread resume.
+- For the conversation test, which replies were phrased and which fell back to the plain templates, and any reply that got the day or time wrong.
 - Output of `node dist/cli.js status --config "$CFG"`. It contains no message text.
 
 Afterwards, stop the service. The test data lives in `~/Library/Application Support/Nori/`. Move `state.sqlite*` aside to start fresh, or keep it for the next round.

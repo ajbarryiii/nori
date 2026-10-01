@@ -10,7 +10,7 @@ export async function demo(): Promise<void> {
   const contact: Contact = { id: "demo", name: "Demo", handles: ["demo@example.com"], role: "owner", plugins: ["reminders"],
     conversation: { chatId: 1, chatGuid: "iMessage;-;demo@example.com" } };
   const config: Config = { assistantUser: "receipts", dataDir, imsgPath: "/unused/demo", pollMs: 5000, contacts: [contact],
-    timezone: "America/Los_Angeles", quietHours: null, jev: null, runtime: null };
+    timezone: "America/Los_Angeles", quietHours: null, jev: null, responder: null, runtime: null };
   const store = new Store(join(dataDir, "state.sqlite")); let now = Date.parse("2026-09-28T16:00:00Z"); let id = 0; let sent = 0;
   const transport: MessageTransport = { readiness: async () => ({ ready: true, detail: "Synthetic transport" }),
     readAfter: async (_conversation, cursor) => ({ messages: [], nextCursor: cursor, hasMore: false }), close: () => {},

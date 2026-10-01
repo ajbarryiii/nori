@@ -1,8 +1,12 @@
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { chmodSync, existsSync, lstatSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import type { Conversation, Enrollment, Message, OutboxItem, RoutingDecision, SendOutcome, Task, TaskState, TaskUsage,
-  WaitingFor } from "./contracts.js";
+import type { Conversation, Enrollment, Message, OutboxItem, Provider, RoutingDecision, SendOutcome, Task, TaskState, TaskUsage,
+  TokenUsage, Turn, WaitingFor } from "./contracts.js";
+
+/** A message waiting, in order, to be understood. Nothing has been applied or acknowledged for it yet. */
+export interface PendingMessage { guid: string; contactId: string; rowId: number; text: string; sentAt: number; attempts: number }
+export interface DailyUsage { provider: Provider; calls: number; failures: number; inputTokens: number; outputTokens: number }
 
 export interface TimerRecord {
   id: number;
@@ -63,7 +67,7 @@ export class Store {
     if (path !== ":memory:") chmodSync(path, 0o600);
     this.db.exec("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
     const version = Number(this.db.prepare("PRAGMA user_version").get()!.user_version);
-    if (version > 2) { this.db.close(); throw new Error("Database schema is newer than this Nori installation."); }
+    if (version > 3) { this.db.close(); throw new Error("Database schema is newer than this Nori installation."); }
     if (version === 1) {
       this.db.close();
       throw new Error("This state database predates approved contacts. Stop Nori, move state.sqlite and its sidecars aside, and enroll each contact again.");
@@ -102,6 +106,22 @@ export class Store {
           message_guid TEXT, reason TEXT, withdrawn INTEGER NOT NULL DEFAULT 0, dispatched_at INTEGER) STRICT;
         CREATE INDEX outbox_pending ON outbox(status, available_at);
         PRAGMA user_version=2;
+      `);
+    });
+    // Version 3: the in-order understanding stage for messages, and daily model usage.
+    if (version < 3) this.transaction(() => {
+      this.db.exec(`
+        ALTER TABLE inbox ADD COLUMN stage TEXT NOT NULL DEFAULT 'done';
+        ALTER TABLE inbox ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX inbox_stage ON inbox(contact_id, stage, row_id);
+        CREATE TABLE usage (day TEXT NOT NULL, provider TEXT NOT NULL, calls INTEGER NOT NULL DEFAULT 0,
+          failures INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (day, provider)) STRICT;
+        -- Schema 2 counted the day's Jev routing calls in settings. They carry over so the daily limit is not reset.
+        INSERT INTO usage(day,provider,calls) SELECT substr(key,15),'jev',CAST(value AS INTEGER) FROM settings
+          WHERE substr(key,1,14)='routing-calls:';
+        DELETE FROM settings WHERE substr(key,1,14)='routing-calls:';
+        PRAGMA user_version=3;
       `);
     });
   }
@@ -155,8 +175,51 @@ export class Store {
   }
 
   hasMessage(guid: string): boolean { return !!this.db.prepare("SELECT guid FROM inbox WHERE guid=?").get(guid); }
-  addMessage(contactId: string, message: Message): void {
-    this.db.prepare("INSERT INTO inbox VALUES (?,?,?,?,?)").run(message.guid, contactId, message.rowId, message.text, message.sentAt);
+  /** A `pending` message waits for understanding; nothing is applied or acknowledged for it yet. */
+  addMessage(contactId: string, message: Message, stage: "done" | "pending" = "done"): void {
+    this.db.prepare("INSERT INTO inbox(guid,contact_id,row_id,text,sent_at,stage) VALUES (?,?,?,?,?,?)")
+      .run(message.guid, contactId, message.rowId, message.text, message.sentAt, stage);
+  }
+  hasPendingMessages(contactId?: string): boolean {
+    return !!(contactId === undefined ? this.db.prepare("SELECT 1 FROM inbox WHERE stage='pending' LIMIT 1").get()
+      : this.db.prepare("SELECT 1 FROM inbox WHERE contact_id=? AND stage='pending' LIMIT 1").get(contactId));
+  }
+  pendingMessageCount(): number { return Number(this.db.prepare("SELECT count(*) n FROM inbox WHERE stage='pending'").get()!.n); }
+  messageStage(guid: string): "pending" | "done" | null {
+    const row = this.db.prepare("SELECT stage FROM inbox WHERE guid=?").get(guid);
+    return row ? row.stage as "pending" | "done" : null;
+  }
+  /** Holds an accepted message for understanding. */
+  holdMessage(guid: string): void { this.db.prepare("UPDATE inbox SET stage='pending' WHERE guid=?").run(guid); }
+  finishMessage(guid: string): void { this.db.prepare("UPDATE inbox SET stage='done' WHERE guid=? AND stage='pending'").run(guid); }
+  /** Claims the contact's oldest pending message and durably counts the attempt before any model call. */
+  claimPendingMessage(contactId: string): PendingMessage | null {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT guid FROM inbox WHERE contact_id=? AND stage='pending' ORDER BY row_id LIMIT 1").get(contactId);
+      if (!row) return null;
+      this.db.prepare("UPDATE inbox SET attempts=attempts+1 WHERE guid=?").run(row.guid!);
+      const claimed = this.db.prepare("SELECT * FROM inbox WHERE guid=?").get(row.guid!)!;
+      return { guid: String(claimed.guid), contactId: String(claimed.contact_id), rowId: Number(claimed.row_id), text: String(claimed.text),
+        sentAt: Number(claimed.sent_at), attempts: Number(claimed.attempts) };
+    });
+  }
+  /**
+   * The contact's conversation, oldest first: handled messages, and Nori messages whose send began (so a question still
+   * being sent is visible to its answer), timed by when they were sent, up to `until`. A reply sorts after the message it
+   * answers.
+   */
+  recentTurns(contactId: string, since: number, limit: number, until = Number.MAX_SAFE_INTEGER): Turn[] {
+    const rows = this.db.prepare(`
+      SELECT 'contact' AS source, text, sent_at AS at, row_id AS ord, 0 AS phase FROM inbox
+        WHERE contact_id=? AND stage='done' AND sent_at>=? AND sent_at<=?
+      UNION ALL
+      SELECT 'nori', o.text, coalesce(o.dispatched_at, o.available_at), coalesce(i.row_id, 0), 1 FROM outbox o
+        LEFT JOIN inbox i ON i.contact_id=o.contact_id
+          AND (o.dedup_key='reply:' || i.guid OR substr(o.dedup_key, 1, length(i.guid) + 7)='reply:' || i.guid || ':')
+        WHERE o.contact_id=? AND o.status IN ('sending','sent','uncertain')
+          AND coalesce(o.dispatched_at, o.available_at)>=? AND coalesce(o.dispatched_at, o.available_at)<=?
+      ORDER BY at DESC, ord DESC, phase DESC LIMIT ?`).all(contactId, since, until, contactId, since, until, limit);
+    return rows.reverse().map(row => ({ from: row.source === "contact" ? "contact" : "nori", text: String(row.text), at: Number(row.at) }));
   }
 
   /** Unroutable tasks (plugin failures and runtime hand-offs) never reach Jev. */
@@ -232,13 +295,13 @@ export class Store {
    */
   claimUnroutedTask(contactIds: readonly string[], fallbackIds: readonly string[], day: string, dailyLimit: number): { task: Task; classify: boolean } | null {
     return this.transaction(() => {
-      const classify = this.daily("routing-calls", day) < dailyLimit;
+      const classify = this.callsToday(day, "jev") < dailyLimit;
       const ids = classify ? contactIds : fallbackIds;
       if (!ids.length) return null;
       const task = this.taskRows(`WHERE state='queued' AND route_attempted=0 AND contact_id IN (${ids.map(() => "?").join(",")})`, ...ids)[0];
       if (!task) return null;
       this.db.prepare("UPDATE tasks SET route_attempted=1 WHERE id=?").run(task.id);
-      if (classify) this.addDaily("routing-calls", day, 1);
+      if (classify) this.reserveCall(day, "jev", dailyLimit);
       return { task, classify };
     });
   }
@@ -248,6 +311,10 @@ export class Store {
     const key = `${name}:${day}`;
     this.db.prepare("DELETE FROM settings WHERE substr(key,1,?)=? AND key<>?").run(name.length + 1, `${name}:`, key);
     this.setSetting(key, String(this.daily(name, day) + amount));
+  }
+  /** Returns a claimed, still-queued task to routing, dropping its decision, so it is routed again later. */
+  releaseRoutingClaim(id: number): void {
+    this.db.prepare("UPDATE tasks SET route=NULL,route_attempted=0 WHERE id=? AND state='queued'").run(id);
   }
   /** A decision is kept only for a still-queued task; late advice cannot restore a cancelled one. */
   saveDecision(id: number, decision: RoutingDecision | null): void {
@@ -283,6 +350,11 @@ export class Store {
   dispatchedAt(key: string): number | null {
     const row = this.db.prepare("SELECT dispatched_at FROM outbox WHERE dedup_key=? AND status IN ('sending','sent','uncertain')").get(key);
     return row === undefined || row.dispatched_at === null ? null : Number(row.dispatched_at);
+  }
+  /** The status of the outbox item with this key, or null when there is none. */
+  outboxStatus(key: string): OutboxItem["status"] | null {
+    const row = this.db.prepare("SELECT status FROM outbox WHERE dedup_key=?").get(key);
+    return row ? row.status as OutboxItem["status"] : null;
   }
   /** Withdraws a job's unsent interruption and budget-limit notices once it continues. */
   cancelPauseNotices(taskId: number): void {
@@ -370,10 +442,15 @@ export class Store {
     this.db.prepare("INSERT INTO plugin_versions VALUES (?,?) ON CONFLICT(plugin_id) DO UPDATE SET version=excluded.version").run(pluginId, version);
   }
 
-  enqueue(message: OutgoingMessage, at: number): void {
-    this.db.prepare(`INSERT OR IGNORE INTO outbox(dedup_key,contact_id,chat_id,chat_guid,text,kind,timer_id,revision,available_at)
-      VALUES (?,?,?,?,?,?,?,?,?)`).run(message.key, message.contactId, message.target.chatId, message.target.chatGuid, message.text,
-      message.kind, message.timer?.id ?? null, message.timer?.revision ?? null, at);
+  /** A `drafting` reply is committed but held while a model phrases it; `finishDraft` releases it. */
+  enqueue(message: OutgoingMessage, at: number, status: "pending" | "drafting" = "pending"): void {
+    this.db.prepare(`INSERT OR IGNORE INTO outbox(dedup_key,contact_id,chat_id,chat_guid,text,kind,timer_id,revision,available_at,status)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(message.key, message.contactId, message.target.chatId, message.target.chatGuid, message.text,
+      message.kind, message.timer?.id ?? null, message.timer?.revision ?? null, at, status);
+  }
+  /** Replaces a drafting reply's template with phrased text, or keeps the template, and releases it for sending. */
+  finishDraft(key: string, text: string | null): void {
+    this.db.prepare("UPDATE outbox SET text=coalesce(?,text),status='pending' WHERE dedup_key=? AND status='drafting'").run(text, key);
   }
   private outboxRows(where: string, ...params: SQLInputValue[]): OutboxItem[] {
     return this.db.prepare(`SELECT * FROM outbox ${where}`).all(...params).map(row => ({
@@ -390,11 +467,16 @@ export class Store {
     this.db.exec(`UPDATE outbox SET status='cancelled' WHERE status='pending' AND kind='timer' AND NOT EXISTS
       (SELECT 1 FROM timers t WHERE t.id=outbox.timer_id AND t.status<>'cancelled' AND t.revision=outbox.revision)`);
   }
-  /** Replies go before timer messages. `eligible` applies per-contact holds such as pause and removed contacts. */
+  /**
+   * Replies go before timer messages, and no reply overtakes an earlier one of the same contact that is still being
+   * phrased. `eligible` applies per-contact holds such as pause and removed contacts.
+   */
   claimOutgoing(now: number, eligible: (item: OutboxItem) => boolean): OutboxItem | null {
     return this.transaction(() => {
       this.cancelStaleTimerMessages();
-      const item = this.outboxRows("WHERE status='pending' AND available_at<=? ORDER BY CASE kind WHEN 'reply' THEN 0 ELSE 1 END,id", now).find(eligible);
+      const item = this.outboxRows(`WHERE status='pending' AND available_at<=? AND NOT (kind='reply' AND EXISTS
+        (SELECT 1 FROM outbox d WHERE d.status='drafting' AND d.contact_id=outbox.contact_id AND d.id<outbox.id))
+        ORDER BY CASE kind WHEN 'reply' THEN 0 ELSE 1 END,id`, now).find(eligible);
       if (!item) return null;
       this.db.prepare("UPDATE outbox SET status='sending',attempts=attempts+1,dispatched_at=? WHERE id=?").run(now, item.id);
       return { ...item, status: "sending", attempts: item.attempts + 1 };
@@ -408,7 +490,31 @@ export class Store {
         .run(now + delay, result.reason, item.id);
     } else this.db.prepare("UPDATE outbox SET status='uncertain',reason=? WHERE id=? AND status='sending'").run(result.reason, item.id);
   }
-  recoverInFlight(): void { this.db.exec("UPDATE outbox SET status='uncertain',reason='Service stopped during send' WHERE status='sending'"); }
+  /** Interrupted sends become uncertain; interrupted phrasing releases the committed template reply. */
+  recoverInFlight(): void {
+    this.db.exec(`UPDATE outbox SET status='uncertain',reason='Service stopped during send' WHERE status='sending';
+      UPDATE outbox SET status='pending' WHERE status='drafting';`);
+  }
+  /** Atomically counts one call against the day's limit. False at the limit; the request must not be sent. */
+  reserveCall(day: string, provider: Provider, limit: number): boolean {
+    if (!Number.isSafeInteger(limit) || limit <= 0) return false;
+    return this.db.prepare(`INSERT INTO usage(day,provider,calls) VALUES (?,?,1)
+      ON CONFLICT(day,provider) DO UPDATE SET calls=usage.calls+1 WHERE usage.calls<?`).run(day, provider, limit).changes > 0;
+  }
+  recordCall(day: string, provider: Provider, ok: boolean, usage: TokenUsage | null): void {
+    this.db.prepare(`INSERT INTO usage(day,provider,failures,input_tokens,output_tokens) VALUES (?,?,?,?,?)
+      ON CONFLICT(day,provider) DO UPDATE SET failures=usage.failures+excluded.failures,
+        input_tokens=usage.input_tokens+excluded.input_tokens, output_tokens=usage.output_tokens+excluded.output_tokens`)
+      .run(day, provider, ok ? 0 : 1, Math.max(0, Math.round(usage?.input ?? 0)), Math.max(0, Math.round(usage?.output ?? 0)));
+  }
+  usage(day: string): DailyUsage[] {
+    return this.db.prepare("SELECT provider,calls,failures,input_tokens,output_tokens FROM usage WHERE day=? ORDER BY provider").all(day)
+      .map(row => ({ provider: row.provider as Provider, calls: Number(row.calls), failures: Number(row.failures),
+        inputTokens: Number(row.input_tokens), outputTokens: Number(row.output_tokens) }));
+  }
+  callsToday(day: string, provider: Provider): number {
+    return Number(this.db.prepare("SELECT calls FROM usage WHERE day=? AND provider=?").get(day, provider)?.calls ?? 0);
+  }
   counts(): { inbox: number; tasks: number; state: number; timers: number; uncertain: number } {
     const count = (sql: string) => Number(this.db.prepare(sql).get()!.n);
     return { inbox: count("SELECT count(*) n FROM inbox"), tasks: count("SELECT count(*) n FROM tasks"),

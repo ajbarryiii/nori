@@ -20,11 +20,30 @@ export interface Contact {
 export interface JevConfig {
   model: string;
   timeoutMs: number;
-  /** Routing calls allowed per local calendar day. Further tasks wait unrouted, or go to a runtime without Jev. */
+  /**
+   * Jev requests allowed per local calendar day, counting routing, understanding, and checks together. Past it, tasks
+   * wait unrouted or go to a runtime without Jev, and conversational messages get model-free handling.
+   */
   dailyLimit: number;
   /** Plugins whose Jev routes may act, mapped to their minimum confidence. Other routes are shadow-only. */
   routes: Readonly<Record<string, number>>;
+  /** Conversational gates. Plugin actions use `routes` as their acting threshold instead of `act`. */
+  thresholds: Thresholds;
 }
+
+export interface Thresholds {
+  /** Minimum confidence before the engine's own conversational changes (pause, resume, cancel) are prepared. */
+  act: number;
+  /** Below this confidence a conversational message is kept as a job instead of being discussed. */
+  clarify: number;
+  /** Minimum probability that a code-written description of a change is what the contact asked for. */
+  verify: number;
+}
+
+/** The language model that extracts details and phrases conversational replies. Requires `jev`. */
+export type ResponderConfig =
+  | { provider: "openrouter"; model: string; timeoutMs: number; dailyLimit: number }
+  | { provider: "codex"; model: string; timeoutMs: number; dailyLimit: number; codexPath: string };
 
 export interface Budget {
   /** Running time per allowance, excluding time spent waiting for approvals. */
@@ -60,6 +79,8 @@ export interface Config {
   pollMs: number;
   quietHours: { start: number; end: number } | null;
   jev: JevConfig | null;
+  /** Null keeps grammars, templates, and immediate job acknowledgements. */
+  responder: ResponderConfig | null;
   runtime: RuntimeConfig | null;
 }
 
@@ -110,7 +131,10 @@ export interface Enrollment {
 export type Capability = "storage" | "schedule" | "network" | "desktop";
 
 export interface PluginManifest {
-  /** Lowercase identifier. `runtime`, `continue`, and `clarify` are reserved for routing options. */
+  /**
+   * Lowercase identifier. `runtime`, `continue`, `clarify`, `chat`, `status`, `pause`, `resume`, and `cancel` are
+   * reserved for routing options.
+   */
   id: string;
   version: string;
   /** Version of the plugin's stored state. The host runs migrate() when it increases. */
@@ -122,6 +146,8 @@ export interface PluginManifest {
   criteria: string;
   /** Example commands for help replies. */
   examples: readonly string[];
+  /** Short phrase completing "Do you want me to …?", such as "save or change a reminder". Defaults to "use <id>". */
+  label?: string;
 }
 
 export type FieldSchema =
@@ -146,6 +172,8 @@ export interface MessageContext {
   /** Reference time: the source message's sent time, or when the timer fired. */
   time: number;
   timezone: string;
+  /** True when contacts may write naturally, so replies can invite a plain answer instead of command syntax. */
+  conversational: boolean;
 }
 
 /** JSON documents namespaced by plugin and contact. Values are returned in insertion order. */
@@ -181,6 +209,31 @@ export interface PluginContext extends MessageContext {
   state: PluginState;
   /** Creates a durable task for a runtime, preserving the full request text. Returns the contact's task number. */
   delegate(text: string, hint?: string): number;
+  /**
+   * Set only during a conversational `interpret`: asks the responder to fill `schema` from the message, the recent
+   * conversation, and `data`. Resolves to the decoded JSON, or null on any failure. Its answer is untrusted.
+   */
+  extract: ((request: ExtractRequest) => Promise<unknown>) | null;
+}
+
+/** What a plugin asks the responder to extract. The engine adds the message, conversation, and local time. */
+export interface ExtractRequest {
+  /** What to extract and how. */
+  instructions: string;
+  /** JSON Schema for the whole answer. Adapters request strict structured output. */
+  schema: Record<string, unknown>;
+  /** The plugin's own context, such as the contact's numbered reminders. */
+  data: string;
+}
+
+/** The code-written account of what `handle` would do with a command. */
+export interface CommandAccount {
+  /** Plain words the contact can confirm, such as `remind you about “call mom” tomorrow (Tue, Sep 29) at 9:00 AM`. */
+  description: string;
+  /** Instants the command sets. A phrased reply must state each one's day and clock time. */
+  times: number[];
+  /** False for a command that only reports, such as a list. Its reply is sent exactly as written, never phrased. */
+  changes: boolean;
 }
 
 export interface Timer {
@@ -209,8 +262,17 @@ export interface ActionPlugin {
   migrate(db: PluginDb, from: number): void;
   /** Whole-message grammar. Runs before Jev and uses no model. */
   match(text: string, ctx: MessageContext): Command | Clarification | null;
-  /** Natural-language step after a Jev route. It may await a parser or model; its context is read-only. */
-  interpret?(text: string, ctx: PluginContext): Promise<Command | Clarification>;
+  /**
+   * Natural-language step after a Jev route. It may await a parser or `ctx.extract`; its context is read-only. Null means
+   * it could not read the message, and the engine falls back to model-free handling. Commands should name their targets
+   * (such as a reminder number) so they cannot change meaning between verification and commit.
+   */
+  interpret?(text: string, ctx: PluginContext): Promise<Command | Clarification | null>;
+  /**
+   * The account of a validated command, for the contact to confirm and for checking a phrased reply. Read-only context.
+   * A plugin acts on conversational messages only with both `interpret` and `describe`.
+   */
+  describe?(command: Command, ctx: PluginContext): CommandAccount;
   handle(command: Command, ctx: PluginContext): void;
   onTimer?(timer: Timer, ctx: PluginContext): void;
   /** Status lines for this contact. Read-only context. */
@@ -273,11 +335,18 @@ export type Route =
   | { kind: "action"; pluginId: string }
   | { kind: "runtime" }
   | { kind: "continue" }
-  | { kind: "clarify" };
+  | { kind: "clarify" }
+  /** Conversational options the engine handles itself. They appear only in a conversational catalog. */
+  | { kind: "chat" }
+  | { kind: "status" }
+  | { kind: "pause" }
+  | { kind: "resume" }
+  | { kind: "cancel" };
 
 export interface RouteCatalog {
   version: string;
-  options: ReadonlyArray<{ id: string; criteria: string; route: Route }>;
+  /** `label` completes "Do you want me to …?" when Nori asks which option was meant. */
+  options: ReadonlyArray<{ id: string; criteria: string; route: Route; label?: string }>;
 }
 
 export interface RoutingDecision {
@@ -401,7 +470,101 @@ export interface OutboxItem {
   kind: "reply" | "timer";
   timerId: number | null;
   revision: number | null;
-  status: "pending" | "sending" | "sent" | "uncertain" | "cancelled";
+  /** `drafting` holds a committed template reply while a model phrases it; recovery releases the template. */
+  status: "drafting" | "pending" | "sending" | "sent" | "uncertain" | "cancelled";
   attempts: number;
   availableAt: number;
+}
+
+/* Conversational replies. Models classify, extract, and phrase. Code validates, resolves, and commits every change. */
+
+export type Provider = "jev" | "openrouter" | "codex";
+export interface TokenUsage { input: number; output: number }
+
+/** Durable per-day ceilings. `reserve` runs before a request leaves the process and fails closed at the limit. */
+export interface UsageMeter {
+  reserve(provider: Provider): boolean;
+  record(provider: Provider, result: { ok: boolean; usage: TokenUsage | null }): void;
+}
+
+export interface ModelRequest {
+  /** Names the schema and distinguishes calls in tests. */
+  purpose: "extract" | "reply";
+  system: string;
+  prompt: string;
+  /** JSON Schema for the whole response object. Adapters request strict structured output. */
+  schema: Record<string, unknown>;
+  maxOutputTokens: number;
+}
+export interface ModelResult { model: string; json: unknown; usage: TokenUsage }
+
+/** A generative model. Returns null on any failure, refusal, budget stop, abort, or unparseable output; never throws. */
+export interface LanguageModel {
+  generate(request: ModelRequest, signal: AbortSignal): Promise<ModelResult | null>;
+  close(): void;
+}
+
+export interface Turn { from: "contact" | "nori"; text: string; at: number }
+
+/** Everything a model may see about one message. Built by code from the store, never from model output. */
+export interface TurnContext {
+  contact: Contact;
+  text: string;
+  /** When the message was sent. Relative words in the message ("tomorrow") are read from it. */
+  sentAt: number;
+  /** When Nori is writing. Relative days in Nori's replies are measured from it, since the message may be handled late. */
+  now: number;
+  timezone: string;
+  /** The conversational catalog for this contact. */
+  catalog: RouteCatalog;
+  /** Status lines from the contact's permitted plugins, as their `summary` hooks return them. */
+  summary: string[];
+  /** The contact's open jobs, oldest first. */
+  jobs: Array<{ number: number; text: string; state: TaskState }>;
+  /** Recent delivered conversation with this contact, oldest first, excluding this message. */
+  turns: Turn[];
+  paused: "none" | "nudges" | "all";
+}
+
+/** A routing decision made with conversation context. Advisory: it never authorizes an action by itself. */
+export interface Understanding extends RoutingDecision {
+  /** Probability that Nori itself would have to contact someone or act outside its own lists. */
+  outbound: number;
+}
+
+export interface Understander {
+  understand(context: TurnContext, signal: AbortSignal): Promise<Understanding | null>;
+}
+
+export interface Judge {
+  /** Probability that the code-written description `proposed` is what the contact asked for. */
+  faithful(context: TurnContext, proposed: string, signal: AbortSignal): Promise<number | null>;
+  /**
+   * Probability that a phrased reply claims Nori did or will do something beyond `committed`, the code-written account
+   * of what was committed (null when nothing changed).
+   */
+  claimsAction(reply: string, committed: string | null, signal: AbortSignal): Promise<number | null>;
+}
+
+/**
+ * A committed reply a model may rephrase. Code decides what it must keep. Questions and answers are never drafts: they are
+ * sent exactly as code wrote them, so a contact's "yes" confirms what code will do and stated deadlines are the stored ones.
+ */
+export interface Draft {
+  /** `result`: the reply to a committed command, which is also the account of what was done. `chat`: nothing changed. */
+  kind: "result" | "chat";
+  template: string;
+  /** Instants the reply must state with their day and clock time. */
+  times: number[];
+  /** Words or numbers such as `#3` or `resume` the reply must keep. */
+  mentions: string[];
+}
+
+/** The engine's conversational models. Every method returns null on failure, abort, or budget stop; none throws. */
+export interface ConversationPort {
+  understand(context: TurnContext, signal: AbortSignal): Promise<Understanding | null>;
+  faithful(context: TurnContext, proposed: string, signal: AbortSignal): Promise<number | null>;
+  extract(context: TurnContext, request: ExtractRequest, signal: AbortSignal): Promise<unknown>;
+  /** A phrased reply that passed code's fact checks and the claims screen, or null to send the template. */
+  phrase(draft: Draft, context: TurnContext, signal: AbortSignal): Promise<string | null>;
 }

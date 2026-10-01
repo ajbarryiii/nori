@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Engine } from "../src/engine.js";
-import { reminders as plugin } from "../src/plugins/reminders.js";
+import { decodeProposal, EXTRACT_SCHEMA, reminders as plugin, type Reminder } from "../src/plugins/reminders.js";
 import { Store } from "../src/store.js";
-import type { PluginContext } from "../src/contracts.js";
+import type { ExtractRequest, PluginContext } from "../src/contracts.js";
 import { config, enroll, epoch, FakeTransport, message, owner, page, reminders } from "./helpers.js";
 
 const timezone = "America/Los_Angeles";
-const match = (text: string, at = epoch) => plugin.match(text, { contact: owner, time: at, timezone });
+const match = (text: string, at = epoch) => plugin.match(text, { contact: owner, time: at, timezone, conversational: false });
 const clarifies = (value: unknown) => typeof value === "object" && value !== null && "clarify" in value;
 
 function setup(t: { after(fn: () => void): void }, path = ":memory:") {
@@ -66,7 +66,7 @@ test("unclear times and invalid dates do not silently become reminders", () => {
 });
 
 test("interpret accepts polite phrasing and otherwise asks one focused question", async () => {
-  const ctx = { contact: owner, time: epoch, timezone } as PluginContext;
+  const ctx = { contact: owner, time: epoch, timezone, conversational: false, extract: null } as unknown as PluginContext;
   assert.deepEqual(await plugin.interpret!("Can you please remind me to call mom in 2 hours?", ctx),
     { kind: "remind", title: "call mom", dueAt: epoch + 2 * 60 * 60_000 });
   assert.deepEqual(await plugin.interpret!("Note buy stamps, please.", ctx), { kind: "note", title: "buy stamps" });
@@ -196,4 +196,134 @@ test("boundary whitespace does not turn a simple request into a compound one", t
   engine.acceptPage("owner", page([message("remind me to stretch in 1 minute\n"), message("\nnote buy milk", 2)]));
   assert.deepEqual(reminders(store).map(x => x.title), ["stretch", "buy milk"]);
   assert.equal(store.tasks().length, 0);
+});
+
+// Conversational interpret: the responder names parts; code resolves them. epoch is Monday, Sep 28, 2026, 9:00 AM local.
+const at = (iso: string) => Date.parse(iso);
+const item = (id: number, title: string, dueAt: number | null = null): Reminder => ({ id, title, dueAt, nextAt: dueAt, status: "active" });
+function talking(items: Reminder[], answer: unknown, time = epoch) {
+  const requests: ExtractRequest[] = []; const replies: string[] = [];
+  const state = { list: () => items, get: (key: string) => items.find(x => `reminder:${x.id}` === key) ?? null };
+  const ctx = { contact: owner, time, timezone, conversational: true, state, reply: (text: string) => { replies.push(text); },
+    extract: async (request: ExtractRequest) => { requests.push(request); return answer; } } as unknown as PluginContext;
+  return { ctx, requests, replies };
+}
+const extraction = (overrides: Record<string, unknown> = {}) => ({ action: "remind", title: "call mom", task_id: null,
+  when: { kind: "at", amount: null, unit: null, day: "tomorrow", hour: 9, minute: 0 }, snooze_minutes: null, missing: [], ...overrides });
+const interpret = (text: string, answer: unknown, items: Reminder[] = []) => plugin.interpret!(text, talking(items, answer).ctx);
+
+test("conversational interpret extracts details and code resolves the time", async () => {
+  const { ctx, requests } = talking([item(4, "stretch", at("2026-09-28T20:00:00Z"))], extraction());
+  assert.deepEqual(await plugin.interpret!("can you remind me to call mom tomorrow morning", ctx),
+    { kind: "remind", title: "call mom", dueAt: at("2026-09-29T16:00:00Z") });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]!.schema, EXTRACT_SCHEMA);
+  assert.match(requests[0]!.data, /#4 stretch \(reminder today \(Mon, Sep 28\) at 1:00 PM\)/);
+  assert.match(requests[0]!.instructions, /time/);
+  assert.match(requests[0]!.instructions, /earlier message.*YYYY-MM-DD/s);
+});
+
+test("polite exact grammar needs no model even when one is available", async () => {
+  const { ctx, requests } = talking([], extraction());
+  assert.deepEqual(await plugin.interpret!("Can you please remind me to call mom in 2 hours?", ctx),
+    { kind: "remind", title: "call mom", dueAt: epoch + 2 * 60 * 60_000 });
+  assert.equal(requests.length, 0);
+});
+
+test("missing or invalid details become one focused question", async () => {
+  const question = async (answer: unknown, items: Reminder[] = []) => (await interpret("x", answer, items) as { clarify: string }).clarify;
+  assert.equal(await question(extraction({ when: null, missing: ["time"] })), "When should I remind you?");
+  assert.equal(await question(extraction({ when: { kind: "at", amount: null, unit: null, day: "today", hour: 8, minute: 0 } })), "When should I remind you?");
+  assert.equal(await question(extraction({ title: null, missing: ["task"] })), "What should I remind you about?");
+  assert.equal(await question(extraction({ title: "x".repeat(201) })), "What should I remind you about?");
+  assert.match(await question(extraction({ action: "done", task_id: 7 }), [item(1, "a"), item(2, "b")]), /Which reminder/);
+  assert.match(await question(extraction({ action: "done", task_id: null }), [item(1, "a"), item(2, "b")]), /Which reminder/);
+  assert.match(await question(extraction({ action: "snooze", task_id: 1, when: null, snooze_minutes: 20_000 }), [item(1, "a")]), /When/);
+  assert.match(await question(extraction({ action: "none" })), /another way/);
+});
+
+test("references, snoozes, notes, and lists resolve against the contact's active reminders", async () => {
+  const items = [item(1, "stretch", epoch), item(2, "call mom")];
+  assert.deepEqual(await interpret("done with the call", extraction({ action: "done", task_id: 2 }), items), { kind: "done", id: 2 });
+  assert.deepEqual(await interpret("finished it", extraction({ action: "done" }), [item(1, "stretch")]), { kind: "done", id: 1 });
+  assert.deepEqual(await interpret("later", extraction({ action: "snooze", task_id: 1, when: null, snooze_minutes: 20 }), items),
+    { kind: "snooze", id: 1, minutes: 20 });
+  assert.deepEqual(await interpret("push it to 1", extraction({ action: "snooze", task_id: 1,
+    when: { kind: "at", amount: null, unit: null, day: "today", hour: 13, minute: 0 } }), items), { kind: "snooze", id: 1, minutes: 240 });
+  assert.deepEqual(await interpret("jot down milk", extraction({ action: "note", title: " buy milk ", when: null })), { kind: "note", title: "buy milk" });
+  assert.deepEqual(await interpret("what's on there", extraction({ action: "list", title: null, when: null })), { kind: "list" });
+});
+
+test("unusable extractions return null so the engine falls back", async () => {
+  for (const answer of [null, "not json", [], { ...extraction(), action: "delete" }, { ...extraction(), missing: "time" }, { ...extraction(), title: 4 }])
+    assert.equal(await interpret("remind me about the thing", answer), null, JSON.stringify(answer));
+});
+
+test("proposal decoding keeps only well-typed fields", () => {
+  assert.deepEqual(decodeProposal(extraction({ title: "  ", task_id: -2, missing: ["time", "bogus"] })), { action: "remind", title: null,
+    taskId: null, when: { kind: "at", day: "tomorrow", hour: 9, minute: 0 }, snoozeMinutes: null, missing: ["time"] });
+  assert.deepEqual(decodeProposal(extraction({ when: { kind: "in", amount: 20, unit: "minutes", day: null, hour: null, minute: null } }))?.when,
+    { kind: "in", amount: 20, unit: "minutes" });
+  assert.equal(decodeProposal(extraction({ when: { kind: "in", amount: null, unit: "minutes", day: null, hour: null, minute: null } }))?.when, null);
+});
+
+test("describe gives the code-written account a contact can confirm", () => {
+  const { ctx } = talking([item(1, "stretch", epoch), item(2, "call mom")], null);
+  const due = at("2026-09-29T17:00:00Z");
+  assert.deepEqual(plugin.describe!({ kind: "remind", title: "call mom", dueAt: due }, ctx),
+    { description: "remind you about “call mom” tomorrow (Tue, Sep 29) at 10:00 AM", times: [due], changes: true });
+  assert.deepEqual(plugin.describe!({ kind: "note", title: "buy milk" }, ctx), { description: "save the note “buy milk”", times: [], changes: true });
+  assert.deepEqual(plugin.describe!({ kind: "done", id: 2 }, ctx), { description: "mark #2 “call mom” as done", times: [], changes: true });
+  assert.deepEqual(plugin.describe!({ kind: "snooze", id: 1, minutes: 20 }, ctx),
+    { description: "snooze #1 “stretch” until today (Mon, Sep 28) at 9:20 AM", times: [epoch + 20 * 60_000], changes: true });
+  assert.deepEqual(plugin.describe!({ kind: "done", id: null }, ctx), { description: "ask which reminder you mean", times: [], changes: false });
+  assert.deepEqual(plugin.describe!({ kind: "list" }, ctx), { description: "show your active reminders", times: [], changes: false });
+});
+
+test("conversational reminder messages invite a plain answer instead of command syntax", () => {
+  const { ctx, replies } = talking([item(1, "stretch", epoch)], null);
+  plugin.onTimer!({ key: "reminder:1", at: epoch, payload: { id: 1 } }, ctx);
+  assert.equal(replies[0], "Reminder: stretch (#1). Tell me when it's done, or ask me to snooze it.");
+});
+
+test("an implicit reminder reference is bound to one reminder or becomes a question", async () => {
+  const one = talking([item(1, "stretch", epoch)], extraction());
+  assert.deepEqual(await plugin.interpret!("could you snooze 20m?", one.ctx), { kind: "snooze", id: 1, minutes: 20 });
+  assert.deepEqual(await plugin.interpret!("done, thanks", one.ctx), { kind: "done", id: 1 });
+  assert.equal(one.requests.length, 0);
+  const two = talking([item(1, "stretch", epoch), item(2, "call mom")], extraction());
+  assert.match((await plugin.interpret!("could you snooze 20m?", two.ctx) as { clarify: string }).clarify, /Which reminder/);
+  assert.deepEqual(await plugin.interpret!("snooze #2 10m please", two.ctx), { kind: "snooze", id: 2, minutes: 10 });
+});
+
+test("the status summary gives each reminder's next time and, when snoozed, its deadline", () => {
+  const snoozed: Reminder = { id: 2, title: "stretch", dueAt: epoch, nextAt: epoch + 20 * 60_000, status: "active" };
+  const { ctx } = talking([item(1, "go to dentist", at("2026-09-29T17:00:00Z")), snoozed, item(3, "buy milk")], null);
+  assert.deepEqual(plugin.summary!(ctx), ["3 active tasks.", "#1: go to dentist (next reminder Sep 29, 10:00 AM PDT)",
+    "#2: stretch (next reminder Sep 28, 9:20 AM PDT; due Sep 28, 9:00 AM PDT)", "#3: buy milk"]);
+});
+
+test("without the responder, an implicit reminder reference is left for handle to ask about with complete commands", async () => {
+  const { ctx } = talking([item(1, "stretch", epoch), item(2, "call mom")], null);
+  const plain = { ...ctx, extract: null } as PluginContext;
+  assert.deepEqual(await plugin.interpret!("please snooze 20m", plain), { kind: "snooze", id: null, minutes: 20 });
+});
+
+test("describe shortens a long title so the account stays within its limit", () => {
+  const long = "y".repeat(4000);
+  const { ctx } = talking([item(1, long, epoch)], null);
+  for (const command of [{ kind: "note", title: long }, { kind: "done", id: 1 }, { kind: "snooze", id: 1, minutes: 20 }]) {
+    const { description } = plugin.describe!(command, ctx);
+    assert.ok(description.length < 200, command.kind);
+    assert.match(description, /y…/);
+  }
+});
+
+test("missing fields count only when the chosen action needs them", async () => {
+  const items = [item(1, "stretch", epoch)];
+  assert.deepEqual(await interpret("finished stretching!", extraction({ action: "done", task_id: 1, when: null, missing: ["time"] }), items),
+    { kind: "done", id: 1 });
+  assert.deepEqual(await interpret("jot down milk", extraction({ action: "note", title: "milk", when: null, missing: ["time"] })), { kind: "note", title: "milk" });
+  assert.deepEqual(await interpret("what's on there", extraction({ action: "list", title: null, when: null, missing: ["time", "task"] })), { kind: "list" });
+  assert.match((await interpret("later", extraction({ action: "snooze", task_id: 1, when: null, missing: ["time"] }), items) as { clarify: string }).clarify, /When/);
 });

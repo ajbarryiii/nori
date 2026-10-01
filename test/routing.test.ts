@@ -5,10 +5,11 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { Engine } from "../src/engine.js";
 import { Store } from "../src/store.js";
-import type { Config, IntentRouter, Route, RoutingDecision } from "../src/contracts.js";
+import type { ActionPlugin, Config, IntentRouter, Route, RoutingDecision } from "../src/contracts.js";
+import { reminders as remindersPlugin } from "../src/plugins/reminders.js";
 import { config, enroll, epoch, FakeTransport, member, message, messageFrom, owner, page, reminders } from "./helpers.js";
 
-const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 100, routes: { reminders: 0.9 } };
+const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 100, routes: { reminders: 0.9 }, thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 } };
 const active: Config = { ...config, contacts: [owner, member], jev };
 const decide = (route: Route, confidence = 1, multiAction = false): RoutingDecision =>
   ({ model: "jev-test", catalogVersion: "test", route, confidence, probabilities: {}, multiAction });
@@ -196,4 +197,21 @@ test("each routing call carries only the sender's catalog and the configured tim
     seen.push({ timezone: ctx.timezone, version: ctx.catalog.version, ids: ctx.catalog.options.map(o => o.id) }); return null;
   } });
   assert.deepEqual(seen, [{ timezone: config.timezone, version: engine.host.catalog(member).version, ids: ["reminders", "continue", "clarify"] }]);
+});
+
+test("plugins written as classes keep their interpret and describe hooks in catalogs", t => {
+  class Notes implements ActionPlugin {
+    manifest = { id: "notes", version: "1.0.0", stateVersion: 1, capabilities: [], roles: ["owner"], criteria: "Notes.", examples: [] } as const;
+    schema = { add: { title: { type: "string", maxLength: 100 } } } as const;
+    migrate() {}
+    match() { return null; }
+    async interpret() { return null; }
+    describe() { return { description: "add a note", times: [], changes: true }; }
+    handle() {}
+  }
+  const store = new Store(":memory:"); t.after(() => store.close());
+  const contact = { ...owner, plugins: ["reminders", "notes"] }; enroll(store, contact);
+  const engine = new Engine({ ...config, contacts: [contact] }, store, new FakeTransport(), { plugins: [remindersPlugin, new Notes()] });
+  assert.ok(engine.host.catalog(contact).options.some(o => o.id === "notes"));
+  assert.ok(engine.host.catalog(contact, { conversational: true }).options.some(o => o.id === "notes"));
 });

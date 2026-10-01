@@ -524,7 +524,7 @@ test("a lost connection or restart leaves the task interrupted until the contact
 });
 
 test("with a runtime, Jev picks plugin actions and everything else falls back to the runtime", async t => {
-  const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 1, routes: { reminders: 0.9 } };
+  const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 1, routes: { reminders: 0.9 }, thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 } };
   const { engine, store, runtime } = setup(t, { ...withRuntime, jev });
   engine.acceptPage("owner", page([message("Can you remind me to call mom in 2 hours?"), message("what's up with my order", 2),
     message("research a phone", 3)]));
@@ -698,7 +698,7 @@ test("an approval code covers only its own request, and prompts that can no long
 });
 
 test("a failed plugin dispatch stays queued for review instead of falling back to the runtime", async t => {
-  const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { reminders: 0.9 } };
+  const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { reminders: 0.9 }, thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 } };
   const { engine, store, runtime } = setup(t, { ...withRuntime, jev });
   engine.acceptPage("owner", page([message(`please note ${"x".repeat(4001)}`)]));
   await engine.routeTasks({ classify: async () => ({ model: "jev-test", catalogVersion: "v", route: { kind: "action", pluginId: "reminders" },
@@ -955,7 +955,7 @@ test("a budget stop refuses an approval that was already pending", async t => {
 });
 
 test("a job with a queued follow-up goes to the runtime instead of a plugin route that would ignore it", async t => {
-  const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { reminders: 0.9 } };
+  const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { reminders: 0.9 }, thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 } };
   const { engine, store, runtime } = setup(t, { ...withRuntime, jev });
   engine.acceptPage("owner", page([message("Can you remind me to call mom in 2 hours?"), message("#1 make that 3 hours", 2)]));
   await engine.routeTasks({ classify: async () => ({ model: "jev-test", catalogVersion: "v", route: { kind: "action", pluginId: "reminders" },

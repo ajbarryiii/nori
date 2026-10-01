@@ -6,17 +6,17 @@
   <key>ProgramArguments</key>
   <array>
     <string>REPLACE_WITH_ABSOLUTE_NODE_PATH</string>
-    <string>/Users/receipts/workspace/github.com/nori/dist/cli.js</string>
+    <string>/Users/nori/workspace/github.com/nori/dist/cli.js</string>
     <string>run</string>
     <string>--config</string>
-    <string>/Users/receipts/Library/Application Support/Nori/config.json</string>
+    <string>/Users/nori/Library/Application Support/Nori/config.json</string>
   </array>
-  <key>WorkingDirectory</key><string>/Users/receipts/workspace/github.com/nori</string>
+  <key>WorkingDirectory</key><string>/Users/nori/workspace/github.com/nori</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Background</string>
   <key>Umask</key><integer>63</integer>
-  <key>StandardOutPath</key><string>/Users/receipts/Library/Application Support/Nori/service.log</string>
-  <key>StandardErrorPath</key><string>/Users/receipts/Library/Application Support/Nori/service-error.log</string>
+  <key>StandardOutPath</key><string>/Users/nori/Library/Application Support/Nori/service.log</string>
+  <key>StandardErrorPath</key><string>/Users/nori/Library/Application Support/Nori/service-error.log</string>
 </dict>
 </plist>

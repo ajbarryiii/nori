@@ -1,6 +1,10 @@
 import { isAbsolute, join } from "node:path";
 import { userInfo } from "node:os";
-import type { Config, Contact } from "./contracts.js";
+import type { Config, Contact, Thresholds } from "./contracts.js";
+
+/** The development console's only contact. Its handle and conversation can never match a real iMessage chat. */
+export const CONSOLE_CONTACT: Contact = Object.freeze({ id: "console", name: "Console", handles: Object.freeze(["console@nori.invalid"]),
+  conversation: Object.freeze({ chatId: 1, chatGuid: "iMessage;-;console@nori.invalid" }), role: "owner", plugins: Object.freeze(["reminders"]) });
 
 export function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -62,7 +66,38 @@ function parseJev(value: unknown): Config["jev"] {
   if (!record(routes) || Object.values(routes).some(x => typeof x !== "number" || !(x > 0 && x <= 1)))
     throw new Error("Jev routes map plugin ids to confidence thresholds above 0 and at most 1.");
   return { model: value.model, timeoutMs: timeoutMs as number, dailyLimit: dailyLimit as number,
-    routes: Object.fromEntries(Object.entries(routes) as Array<[string, number]>) };
+    routes: Object.fromEntries(Object.entries(routes) as Array<[string, number]>), thresholds: parseThresholds(value.thresholds) };
+}
+
+function parseThresholds(value: unknown): Thresholds {
+  const t = value ?? {};
+  if (!record(t)) throw new Error("Jev thresholds must be an object.");
+  const [act, clarify, verify] = [t.act ?? 0.8, t.clarify ?? 0.5, t.verify ?? 0.6];
+  const unit = (x: unknown): x is number => typeof x === "number" && x > 0 && x < 1;
+  if (!unit(act) || !unit(clarify) || !unit(verify) || clarify > act) throw new Error("Jev thresholds need 0 < clarify <= act < 1 and 0 < verify < 1.");
+  return { act, clarify, verify };
+}
+
+/** The responder needs Jev, because Jev decides what a message is before any extraction or phrasing. */
+function parseResponder(value: unknown, jev: Config["jev"], runtime: Config["runtime"]): Config["responder"] {
+  if (value == null) return null;
+  if (!record(value)) throw new Error("responder must be an object.");
+  if (!jev) throw new Error("Conversational replies need Jev. Configure jev as well as responder.");
+  if (value.provider !== "openrouter" && value.provider !== "codex") throw new Error("responder.provider must be openrouter or codex.");
+  const model = typeof value.model === "string" ? value.model.trim() : "";
+  if (!model || model.length > 100 || model.endsWith("latest") || model.startsWith("openrouter/"))
+    throw new Error("Pin a specific responder model; routers and latest aliases are not allowed.");
+  const integer = (key: string, fallback: number, min: number, max: number) => {
+    const n = value[key] ?? fallback;
+    if (!Number.isInteger(n) || (n as number) < min || (n as number) > max) throw new Error(`responder.${key} must be an integer between ${min} and ${max}.`);
+    return n as number;
+  };
+  const timeoutMs = integer("timeoutMs", value.provider === "codex" ? 90_000 : 20_000, 1_000, 180_000);
+  const dailyLimit = integer("dailyLimit", 300, 1, 10_000);
+  if (value.provider === "openrouter") return { provider: "openrouter", model, timeoutMs, dailyLimit };
+  const codexPath = value.codexPath ?? runtime?.codexPath;
+  if (typeof codexPath !== "string" || !isAbsolute(codexPath)) throw new Error("responder.codexPath must be an absolute path.");
+  return { provider: "codex", model, timeoutMs, dailyLimit, codexPath };
 }
 
 function parseRuntime(value: unknown, dataDir: string): Config["runtime"] {
@@ -122,8 +157,23 @@ export function parseConfig(value: unknown): Config {
       || q.start === q.end) throw new Error("quietHours needs distinct start/end hours from 0 to 23.");
     quietHours = { start: q.start as number, end: q.end as number };
   }
-  return { assistantUser, contacts, timezone, dataDir, imsgPath, pollMs: pollMs as number, quietHours, jev: parseJev(value.jev),
-    runtime: parseRuntime(value.runtime, dataDir) };
+  const jev = parseJev(value.jev); const runtime = parseRuntime(value.runtime, dataDir);
+  return { assistantUser, contacts, timezone, dataDir, imsgPath, pollMs: pollMs as number, quietHours, jev,
+    responder: parseResponder(value.responder, jev, runtime), runtime };
+}
+
+/**
+ * Development console settings. Only timezone, quiet hours, Jev, and the responder are read from the file; identity,
+ * contacts, paths, the transport, and the runtime are forced to local console values so a live config cannot leak in.
+ */
+export function parseConsoleConfig(input: unknown, options: { dataDir: string; username: string }): Config {
+  const source = record(input) ? input : {};
+  // The runtime is dropped, so a Codex responder that inherits its CLI takes the path now.
+  const responder = record(source.responder) && source.responder.provider === "codex" && source.responder.codexPath == null
+    && record(source.runtime) ? { ...source.responder, codexPath: source.runtime.codexPath } : source.responder;
+  return parseConfig({ assistantUser: options.username, contacts: [{ ...CONSOLE_CONTACT, handles: [...CONSOLE_CONTACT.handles] }],
+    dataDir: options.dataDir, imsgPath: "/dev/null", pollMs: 1000, timezone: source.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+    quietHours: source.quietHours ?? null, jev: source.jev ?? null, responder: responder ?? null });
 }
 
 export function requireAssistantUser(config: Config, actual = userInfo().username): void {

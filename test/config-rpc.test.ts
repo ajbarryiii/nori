@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { test } from "node:test";
 import { resolve } from "node:path";
-import { parseConfig, requireAssistantUser } from "../src/config.js";
+import { CONSOLE_CONTACT, parseConfig, parseConsoleConfig, requireAssistantUser } from "../src/config.js";
 import { parseListings, StdioRpc, type ProcessTable } from "../src/rpc.js";
 
 const contact = { id: "owner", name: "Owner", handles: ["Owner@Example.com"], role: "owner", plugins: ["reminders"],
@@ -56,11 +56,45 @@ test("the Codex runtime needs absolute paths and bounded budgets", () => {
 });
 
 test("Jev routing needs a pinned model and bounded thresholds and limits", () => {
-  const jev = { model: "jev-1.13.0", timeoutMs: 2500, dailyLimit: 50, routes: { reminders: 0.9 } };
+  const jev = { model: "jev-1.13.0", timeoutMs: 2500, dailyLimit: 50, routes: { reminders: 0.9 }, thresholds: { act: 0.9, clarify: 0.4, verify: 0.7 } };
   assert.deepEqual(parseConfig({ ...input, jev }).jev, jev);
-  assert.deepEqual(parseConfig({ ...input, jev: { model: "jev-1.13.0" } }).jev, { model: "jev-1.13.0", timeoutMs: 2500, dailyLimit: 100, routes: {} });
+  assert.deepEqual(parseConfig({ ...input, jev: { model: "jev-1.13.0" } }).jev, { model: "jev-1.13.0", timeoutMs: 2500, dailyLimit: 100, routes: {},
+    thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 } });
+  assert.equal(parseConfig({ ...input, jev }).responder, null);
   for (const bad of [{ ...jev, model: "jev-latest" }, { ...jev, dailyLimit: 0 }, { ...jev, routes: { reminders: 0 } },
-    { ...jev, routes: { reminders: 1.5 } }, { ...jev, routes: [] }]) assert.throws(() => parseConfig({ ...input, jev: bad }), JSON.stringify(bad));
+    { ...jev, routes: { reminders: 1.5 } }, { ...jev, routes: [] }, { ...jev, thresholds: { act: 0.5, clarify: 0.8 } },
+    { ...jev, thresholds: { verify: 1 } }, { ...jev, thresholds: [] }]) assert.throws(() => parseConfig({ ...input, jev: bad }), JSON.stringify(bad));
+});
+
+test("a responder needs Jev, a pinned model, and an absolute Codex path", () => {
+  const jev = { model: "jev-1.13.0" };
+  assert.deepEqual(parseConfig({ ...input, jev, responder: { provider: "openrouter", model: "xiaomi/mimo-v2.6-flash" } }).responder,
+    { provider: "openrouter", model: "xiaomi/mimo-v2.6-flash", timeoutMs: 20_000, dailyLimit: 300 });
+  assert.deepEqual(parseConfig({ ...input, jev, responder: { provider: "codex", model: "gpt-6-luna", codexPath: "/opt/homebrew/bin/codex" } }).responder,
+    { provider: "codex", model: "gpt-6-luna", timeoutMs: 90_000, dailyLimit: 300, codexPath: "/opt/homebrew/bin/codex" });
+  // A Codex responder may reuse the runtime's Codex CLI.
+  assert.deepEqual(parseConfig({ ...input, jev, runtime: { codexPath: "/usr/local/bin/codex" }, responder: { provider: "codex", model: "gpt-6-luna" } })
+    .responder, { provider: "codex", model: "gpt-6-luna", timeoutMs: 90_000, dailyLimit: 300, codexPath: "/usr/local/bin/codex" });
+  for (const bad of [{ responder: { provider: "openrouter", model: "xiaomi/mimo-v2.6-flash" } },
+    { jev, responder: { provider: "anthropic", model: "x" } }, { jev, responder: { provider: "openrouter", model: "openrouter/auto" } },
+    { jev, responder: { provider: "openrouter", model: "a/latest" } },
+    { jev, responder: { provider: "codex", model: "gpt-6-luna", codexPath: "codex" } }, { jev, responder: { provider: "codex", model: "gpt-6-luna" } },
+    { jev, responder: { provider: "openrouter", model: "a/b", dailyLimit: 0 } },
+    { jev, responder: { provider: "openrouter", model: "a/b", timeoutMs: 10 } }, { jev, responder: "openrouter" }])
+    assert.throws(() => parseConfig({ ...input, ...bad }), JSON.stringify(bad));
+});
+
+test("console configuration ignores live identity, contacts, paths, and the runtime", () => {
+  const parsed = parseConsoleConfig({ ...input, dataDir: "/Users/nori/Library/Application Support/Nori", timezone: "Europe/Paris",
+    runtime: { codexPath: "/usr/local/bin/codex" } }, { dataDir: "/tmp/nori-console", username: "dev" });
+  assert.equal(parsed.dataDir, "/tmp/nori-console"); assert.equal(parsed.assistantUser, "dev");
+  assert.deepEqual(parsed.contacts, [CONSOLE_CONTACT]); assert.equal(parsed.timezone, "Europe/Paris");
+  assert.equal(parsed.runtime, null);
+  assert.equal(parseConsoleConfig({}, { dataDir: "/tmp/nori-console", username: "dev" }).jev, null);
+  // A Codex responder that inherits the live runtime's CLI keeps it, though the runtime itself is dropped.
+  const inherited = parseConsoleConfig({ ...input, jev: { model: "jev-1.13.0" }, runtime: { codexPath: "/usr/local/bin/codex" },
+    responder: { provider: "codex", model: "gpt-6-luna" } }, { dataDir: "/tmp/nori-console", username: "dev" });
+  assert.deepEqual([inherited.runtime, inherited.responder?.provider === "codex" && inherited.responder.codexPath], [null, "/usr/local/bin/codex"]);
 });
 
 test("stdio RPC correlates responses and rejects unknown inbound calls", async t => {
@@ -96,6 +130,20 @@ test("stdio RPC can pass the child an explicit environment and reports when it c
   // Reported once what the server left behind has been checked.
   await report; rpc.close();
   assert.equal(closed, 1);
+});
+
+test("stdio RPC children inherit the environment without Nori's API keys", async t => {
+  const saved = { typesafe: process.env.TYPESAFE_API_KEY, openrouter: process.env.OPENROUTER_API_KEY };
+  process.env.TYPESAFE_API_KEY = "parent-only"; process.env.OPENROUTER_API_KEY = "parent-only";
+  t.after(() => {
+    for (const [name, value] of [["TYPESAFE_API_KEY", saved.typesafe], ["OPENROUTER_API_KEY", saved.openrouter]] as const)
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  });
+  const rpc = new StdioRpc({ command: process.execPath, args: [resolve("test/fixtures/rpc-child.mjs")], timeoutMs: 500 });
+  t.after(() => rpc.close());
+  const keys = await rpc.request("env", {}) as string[];
+  assert.ok(keys.includes("PATH"));
+  assert.ok(!keys.includes("TYPESAFE_API_KEY")); assert.ok(!keys.includes("OPENROUTER_API_KEY"));
 });
 
 /** Whether a process is still running. One that has exited but not yet been collected is not. */

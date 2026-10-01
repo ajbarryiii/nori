@@ -1,7 +1,9 @@
 import { chmodSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
-import type { CodexWorker, RpcHandlers, RpcPort, Runtime, RuntimeEvents, RuntimeTool, Task, TurnOutcome } from "./contracts.js";
+import type { CodexWorker, LanguageModel, ModelRequest, ModelResult, RpcHandlers, RpcPort, Runtime, RuntimeEvents, RuntimeTool, Task, TokenUsage,
+  TurnOutcome, UsageMeter } from "./contracts.js";
 import { object as record } from "./config.js";
+import { parseJsonText } from "./openrouter.js";
 import { StdioRpc } from "./rpc.js";
 
 /** Protocol inspection only. Desktop Computer Use is not assumed to be exposed by app-server. */
@@ -416,5 +418,181 @@ export class CodexRuntime implements Runtime {
     const checks = (evidence as string[]).map(x => clip(x.trim(), 300)).filter(Boolean).slice(0, 20);
     return checks.length ? { status: "completed", message: clip(reply), evidence: checks }
       : { status: "failed", message: clip(`${reply} (It reported no checks, so it is not marked done.)`) };
+  }
+}
+
+/**
+ * Codex features the responder turns off: shell, apps, plugins, browsers, computer use, image generation and viewing,
+ * sub-agents, goals, memories, hooks, tool suggestions, skills search, and sleep. Checked against codex-cli 0.156.1, whose
+ * `config/read` reports each one.
+ */
+export const codexResponderFeatures: readonly string[] = ["shell_tool", "unified_exec", "apps", "plugins", "browser_use",
+  "browser_use_external", "in_app_browser", "computer_use", "image_generation", "view_image", "multi_agent", "multi_agent_v2", "goals",
+  "memories", "hooks", "tool_suggest", "skill_mcp_dependency_install", "skill_search", "sleep_tool"];
+/** App-server flags for a plain conversational turn: those features off, web search disabled, and no MCP servers. */
+export const codexAppServerArgs = ["app-server", ...codexResponderFeatures.flatMap(feature => ["--disable", feature]),
+  "-c", 'web_search="disabled"', "-c", "mcp_servers={}"];
+
+/** Spawns the responder's tool-free `codex app-server` with Nori's Codex home and a minimal environment. */
+export function codexResponderConnection(codexPath: string, home: string, timeoutMs: number): (handlers: RpcHandlers) => RpcPort {
+  return handlers => new StdioRpc({ command: codexPath, args: codexAppServerArgs, timeoutMs, env: codexEnvironment(process.env, home), handlers });
+}
+
+/** One abort listener per request; the returned promise only ever rejects, and that rejection is always handled. */
+function abortion(signal: AbortSignal): { aborted: Promise<never>; release: () => void } {
+  let release = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(new Error("Codex request aborted or timed out."));
+    if (signal.aborted) { onAbort(); return; }
+    signal.addEventListener("abort", onAbort, { once: true });
+    release = () => signal.removeEventListener("abort", onAbort);
+  });
+  aborted.catch(() => {});
+  return { aborted, release: () => release() };
+}
+
+/**
+ * Codex app-server as the responder, under the ChatGPT plan signed in to Nori's Codex home. Each request is a new
+ * ephemeral, read-only thread with Nori's instructions and a strict output schema, and approvals never. Server requests
+ * are refused. Returns null on any failure, timeout, or abort; never throws. Separate from the job runtime's connection.
+ */
+export class CodexModel implements LanguageModel {
+  private rpc: RpcPort | null = null;
+  private connecting: RpcPort | null = null;
+  private starting: Promise<RpcPort> | null = null;
+  private closed = false;
+  private readonly listeners = new Set<(method: string, params: Record<string, unknown>) => void>();
+  constructor(private readonly options: { model: string; timeoutMs: number; cwd: string; connect: (handlers: RpcHandlers) => RpcPort;
+    meter?: UsageMeter }) {}
+
+  private connection(): Promise<RpcPort> {
+    if (this.closed) return Promise.reject(new Error("Codex responder is closed."));
+    if (this.rpc) return Promise.resolve(this.rpc);
+    this.starting ??= (async () => {
+      let rpc: RpcPort | null = null;
+      rpc = this.options.connect({
+        notification: (method, params) => {
+          for (const listener of [...this.listeners]) { try { listener(method, params); } catch { /* A listener cannot break the connection. */ } }
+        },
+        // A server that exits is replaced on the next request.
+        closed: () => { if (rpc && this.rpc === rpc) this.rpc = null; },
+      });
+      this.connecting = rpc;
+      try {
+        const init = record(await rpc.request("initialize", { clientInfo: { name: "nori", title: "Nori", version: "0.1.0" }, capabilities: null }));
+        if (!init || typeof init.userAgent !== "string") throw new Error("Invalid Codex initialization result.");
+        // close() may have run while initialize was in flight; never keep an app-server nobody will close.
+        if (this.closed) throw new Error("Codex responder closed during startup.");
+        rpc.notify("initialized", {});
+        // The flags must have taken effect: a lower configuration layer can add MCP servers that the `mcp_servers={}` override
+        // does not remove, and any tool left on would let a contact's text reach local data. Only a connection whose effective
+        // configuration shows every restriction is used.
+        const config = record(record(await rpc.request("config/read", { includeLayers: false, cwd: this.options.cwd }))?.config);
+        if (!config) throw new Error("Codex did not report its configuration.");
+        const features = record(config.features);
+        if (!features || codexResponderFeatures.some(name => features[name] !== false) || config.web_search !== "disabled")
+          throw new Error("Codex did not apply the responder's tool restrictions.");
+        const servers = config.mcp_servers;
+        if (servers != null && (!record(servers) || Object.values(servers).some(server => record(server)?.enabled !== false)))
+          throw new Error("An MCP server is configured for the Codex responder.");
+        if (this.closed) throw new Error("Codex responder closed during startup.");
+        this.rpc = rpc; return rpc;
+      } catch (error) { rpc.close(); throw error; }
+      finally { this.connecting = null; }
+    })().finally(() => { this.starting = null; });
+    return this.starting;
+  }
+
+  async generate(request: ModelRequest, signal: AbortSignal): Promise<ModelResult | null> {
+    const { model, timeoutMs, cwd, meter } = this.options;
+    if (this.closed || (meter && !meter.reserve("codex"))) return null;
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+    let ok = false; let usage: TokenUsage | null = null;
+    let rpc: RpcPort | null = null; let threadId: string | null = null; let turnId: string | null = null; let status: string | null = null;
+    let starting: Promise<unknown> | null = null;
+    const events: Array<{ method: string; params: Record<string, unknown> }> = [];
+    let wake = () => {};
+    const listener = (method: string, params: Record<string, unknown>) => { events.push({ method, params }); wake(); };
+    this.listeners.add(listener);
+    const { aborted, release } = abortion(deadline);
+    const within = <T>(promise: Promise<T>) => Promise.race([promise, aborted]);
+    try {
+      rpc = await within(this.connection());
+      const thread = record(await within(rpc.request("thread/start", { model, cwd, approvalPolicy: "never", sandbox: "read-only",
+        ephemeral: true, baseInstructions: request.system, serviceName: "nori" })));
+      threadId = text(record(thread?.thread)?.id);
+      if (!threadId) return null;
+      starting = rpc.request("turn/start", { threadId, input: [{ type: "text", text: request.prompt, text_elements: [] }],
+        outputSchema: request.schema, effort: "low" });
+      const turn = record(await within(starting));
+      turnId = text(record(turn?.turn)?.id);
+      // A start without a turn id leaves the server state unknown, so it is cleaned up like an unconfirmed start.
+      if (!turnId) throw new Error("Codex did not return a turn.");
+      let reply: string | null = null; let seen = 0;
+      while (status === null) {
+        for (; seen < events.length; seen++) {
+          const { method, params } = events[seen]!;
+          if (params.threadId !== threadId) continue;
+          if (method === "item/completed" && params.turnId === turnId) {
+            const item = record(params.item);
+            if (item?.type === "agentMessage" && typeof item.text === "string") reply = item.text;
+          } else if (method === "thread/tokenUsage/updated" && params.turnId === turnId) {
+            const total = record(record(params.tokenUsage)?.total);
+            if (total && Number.isFinite(total.inputTokens)) usage = { input: Number(total.inputTokens), output: Number(total.outputTokens) || 0 };
+          } else if (method === "turn/completed" && record(params.turn)?.id === turnId) {
+            status = String(record(params.turn)?.status);
+          }
+        }
+        if (status === null) await within(new Promise<void>(resolve => { wake = resolve; }));
+      }
+      if (status !== "completed" || reply === null) return null;
+      const json = parseJsonText(reply);
+      if (json === undefined) return null;
+      ok = true;
+      return { model, json, usage: usage ?? { input: 0, output: 0 } };
+    } catch {
+      // The turn may be running even if its start was confirmed too late: take its id from a notification, or from the late
+      // response, and interrupt it so it stops using the plan's allowance.
+      if (rpc && threadId && status === null) {
+        const live = rpc; const thread = threadId;
+        // A turn that cannot be interrupted is stopped by closing its connection.
+        const abandon = () => { if (this.rpc === live) this.rpc = null; live.close(); };
+        const interrupt = (id: string) => { live.request("turn/interrupt", { threadId: thread, turnId: id }).catch(abandon); };
+        const noticed = turnId ?? events.map(e => e.method === "turn/started" && e.params.threadId === thread ? text(record(e.params.turn)?.id) : null)
+          .find((id): id is string => id !== null) ?? null;
+        if (noticed) interrupt(noticed);
+        else if (starting) {
+          // Keep watching until the start settles. A start that fails without naming its turn leaves the server's state unknown,
+          // so the connection is closed, which stops anything it started.
+          let found = false;
+          const watch = (method: string, params: Record<string, unknown>) => {
+            const id = method === "turn/started" && params.threadId === thread ? text(record(params.turn)?.id) : null;
+            if (id && !found) { found = true; this.listeners.delete(watch); interrupt(id); }
+          };
+          this.listeners.add(watch);
+          starting.then(response => {
+            this.listeners.delete(watch);
+            if (found) return;
+            // A late response names the turn to interrupt; one that names none leaves it unknown, so the connection goes.
+            const id = text(record(record(response)?.turn)?.id);
+            found = true;
+            if (id) interrupt(id); else abandon();
+          }, () => {
+            this.listeners.delete(watch);
+            if (!found) abandon();
+          });
+        }
+      }
+      return null;
+    } finally {
+      this.listeners.delete(listener); release();
+      if (rpc && threadId && this.rpc === rpc) rpc.request("thread/unsubscribe", { threadId }).catch(() => {});
+      meter?.record("codex", { ok, usage });
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    this.rpc?.close(); this.connecting?.close(); this.rpc = null;
   }
 }
