@@ -45,7 +45,7 @@ const draft = (overrides: Partial<Draft>): Draft => ({ kind: "result", template:
 
 test("the gate keeps outbound, compound, unsure, and job-like messages as jobs", () => {
   for (const u of [understanding("reminders", 0.99, { outbound: 0.9 }), understanding("reminders", 0.99, { multiAction: true }),
-    understanding("reminders", 0.3), understanding("runtime", 0.9), understanding("continue", 0.9), understanding("chat", 0.4)])
+    understanding("reminders", 0.3), understanding("runtime", 0.9), understanding("continue", 0.7), understanding("chat", 0.4)])
     assert.deepEqual(gate(u, thresholds, routes), { kind: "job" }, `${u.route.kind} ${u.confidence}`);
   assert.deepEqual(gate(understanding("reminders"), thresholds, {}), { kind: "job" }, "a plugin route that is not enabled");
 });
@@ -58,7 +58,7 @@ test("the gate asks, answers, or prepares a change by confidence", () => {
   assert.deepEqual(gate(understanding("chat", 0.6), thresholds, routes), { kind: "chat" });
   assert.deepEqual(gate(understanding("status", 0.6), thresholds, routes), { kind: "status" });
   assert.deepEqual(gate(understanding("pause", 0.7), thresholds, routes).kind, "ask");
-  for (const option of ["reminders", "pause", "resume", "cancel"])
+  for (const option of ["reminders", "pause", "resume", "cancel", "continue"])
     assert.deepEqual(gate(understanding(option, 0.9), thresholds, routes), { kind: "act", option });
 });
 

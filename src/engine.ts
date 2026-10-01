@@ -152,7 +152,7 @@ export class Engine {
   /** Dispatches a message; one that is handled answers, and so closes, any open conversational question. */
   private handle(contact: Contact, message: MessageRef): boolean {
     if (!this.dispatch(contact, message)) return false;
-    if (this.conversation) this.store.setSetting(`question:${contact.id}`, "");
+    this.closePrompts(contact.id);
     return true;
   }
 
@@ -190,16 +190,39 @@ export class Engine {
     // A reply to the runtime's one open question continues that job. With several open, ask once which.
     // Only a message written after the question was sent (or while it was being sent) can be its answer. A conversational
     // question Nori sent since then, and still open, gets the answer instead.
-    const open = this.conversation ? this.store.setting(`question:${contact.id}`) : null;
-    const asked = open ? this.store.dispatchedAt(open) : null;
-    const asking = this.store.tasks(contact.id).filter(x => {
-      const delivered = x.state === "waiting_contact" && x.waitingFor?.kind === "question"
-        ? this.store.dispatchedAt(`task:${x.id}:turn:${x.usage.turns}:question`) : null;
-      return delivered !== null && delivered <= message.sentAt && !(asked !== null && asked > delivered && asked <= message.sentAt);
-    });
+    const prompted = this.prompts(contact.id).map(key => this.store.dispatchedAt(key))
+      .filter((at): at is number => at !== null && at <= message.sentAt);
+    const asking = this.waitingOnQuestion(contact).filter(({ delivered }) => delivered <= message.sentAt
+      && !prompted.some(at => at > delivered)).map(({ task }) => task);
     if (asking.length === 1) { reply(this.followUp(contact, asking[0]!, message.text, message.sentAt)); return true; }
     if (asking.length > 1) { reply(`Which job is that for? Reply ${asking.map(x => `‘#${x.number} …’`).join(" or ")}.`); return true; }
     return false;
+  }
+
+  /** The contact's jobs waiting on a runtime question that has been delivered, with when its send began. */
+  private waitingOnQuestion(contact: Contact): Array<{ task: Task; delivered: number }> {
+    return this.store.tasks(contact.id).flatMap(task => {
+      const delivered = task.state === "waiting_contact" && task.waitingFor?.kind === "question"
+        ? this.store.dispatchedAt(`task:${task.id}:turn:${task.usage.turns}:question`) : null;
+      return delivered === null ? [] : [{ task, delivered }];
+    });
+  }
+
+  /**
+   * Outbox keys of Nori's conversational prompts to the contact (questions, and reminders that invite a plain reply) that
+   * no later message from them has answered. While one sent after a job's question is open, replies go to understanding.
+   */
+  private prompts(contactId: string): string[] {
+    try {
+      const value: unknown = JSON.parse(this.store.setting(`prompts:${contactId}`) ?? "[]");
+      return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
+    } catch { return []; }
+  }
+  private addPrompt(contactId: string, key: string): void {
+    if (this.conversation) this.store.setSetting(`prompts:${contactId}`, JSON.stringify([...this.prompts(contactId), key].slice(-5)));
+  }
+  private closePrompts(contactId: string): void {
+    if (this.conversation) this.store.setSetting(`prompts:${contactId}`, "[]");
   }
 
   /** Keeps the whole request as a task and acknowledges it. Failed dispatches are recorded without message text and skip Jev. */
@@ -432,7 +455,9 @@ export class Engine {
         const fire = { id: timer.id, revision: timer.revision };
         const source: DispatchSource = { contact, time: now, now, replyKey: n => `timer:${timer.id}:${timer.revision}:${n}`, timer: fire, sourceGuid: null };
         try { this.store.savepoint(() => this.host.invoke(plugin, source, ctx => plugin.onTimer!({ key: timer.key, at: timer.at, payload: timer.payload }, ctx))); }
-        catch { this.store.markFailed(timer.id); }
+        catch { this.store.markFailed(timer.id); continue; }
+        // A reminder invites a plain reply, which should reach understanding rather than an older job question.
+        this.addPrompt(contact.id, source.replyKey(0));
       }
     });
   }
@@ -516,6 +541,13 @@ export class Engine {
     if (option === "pause") return confirm("pause all reminder messages until you say resume",
       { kind: "engine", command: { kind: "pause", scope: "all" }, mentions: ["resume"] });
     if (option === "resume") return confirm("resume reminder messages now", { kind: "engine", command: { kind: "resume" }, mentions: [] });
+    if (option === "continue") {
+      const waiting = this.waitingOnQuestion(contact);
+      if (waiting.length !== 1) return { kind: "job", decision: u };
+      const { task } = waiting[0]!;
+      return confirm(`send your reply to job #${task.number}${task.outcome ? ` (which asked: “${clip(task.outcome, 80)}”)` : ""}`,
+        { kind: "engine", command: { kind: "followUp", id: task.number, text: item.text }, mentions: [`#${task.number}`] });
+    }
     if (option === "cancel") {
       const open = this.store.tasks(contact.id).filter(x => OPEN.includes(x.state));
       if (!open.length) return { kind: "answer", text: "You have no open jobs to cancel." };
@@ -564,7 +596,8 @@ export class Engine {
       if (this.store.messageStage(item.guid) !== "pending") return;
       this.store.finishMessage(item.guid);
       const source = this.source(contact, item); const key = `reply:${item.guid}`;
-      this.store.setSetting(`question:${contact.id}`, plan.kind === "ask" ? key : "");
+      this.closePrompts(contact.id);
+      if (plan.kind === "ask") this.addPrompt(contact.id, key);
       const say = (kind: Draft["kind"], template: string, times: number[] = [], mentions = numbers(template)) => {
         this.enqueue(source, key, template, "drafting");
         draft = { kind, template, times, mentions };
@@ -593,7 +626,7 @@ export class Engine {
           let account: CommandAccount | null = null;
           try { account = this.host.describe(plan.plugin, source, plan.command); } catch { account = null; }
           if (account?.description !== plan.account.description || account.times.join() !== plan.account.times.join()) {
-            this.enqueue(source, key, CHANGED); this.store.setSetting(`question:${contact.id}`, key); return;
+            this.enqueue(source, key, CHANGED); this.addPrompt(contact.id, key); return;
           }
           try { this.store.savepoint(() => this.host.invoke(plan.plugin, { ...source, capture }, ctx => plan.plugin.handle(plan.command, ctx))); }
           catch { this.retain(source, item.text, `${id}: handler error`); return; }

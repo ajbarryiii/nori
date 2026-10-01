@@ -55,10 +55,10 @@ async function chat(configPath: string | undefined, dataDirArg: string | undefin
     transport = new ConsoleTransport({ input: process.stdin, output: process.stdout, startRowId: store.enrollment(CONSOLE_CONTACT.id)!.cursor });
     const stop = () => controller.abort();
     const [s, t] = [store, transport];
-    // At the end of input the service stops once every typed line is read, understood, routed, and answered. A model
-    // that never answers cannot keep it running for more than two minutes.
+    // At the end of input the service stops once every typed line is read, understood, routed, and answered. Each model
+    // request has its own timeout, so this always finishes; Ctrl-C stops it sooner.
     let ended = false;
-    void t.ended.then(() => { ended = true; setTimeout(stop, 120_000).unref(); });
+    void t.ended.then(() => { ended = true; });
     const done = () => ended && (s.enrollment(CONSOLE_CONTACT.id)?.cursor ?? 0) >= t.lastRowId;
     process.once("SIGINT", stop);
     console.log(`Nori console (development only; iMessage is not used). ${describeModels(config)}\nState: ${join(config.dataDir, "console.sqlite")}. Type a message; Ctrl-D or Ctrl-C quits.`);

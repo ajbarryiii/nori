@@ -29,14 +29,15 @@ export type Gate =
   | { kind: "ask"; options: string[] }
   | { kind: "chat" }
   | { kind: "status" }
-  /** Prepare a change by a plugin or the engine (`pause`, `resume`, `cancel`). It still needs the agreement check. */
+  /** Prepare a change by a plugin or the engine (`pause`, `resume`, `cancel`, `continue`). It still needs the agreement check. */
   | { kind: "act"; option: string };
 
 /** The routing policy. Jev supplies calibrated probabilities; code decides what happens next. */
 export function gate(u: Understanding, thresholds: Thresholds, routes: Readonly<Record<string, number>>): Gate {
   const option = optionId(u.route);
-  if (u.outbound >= 0.5 || u.multiAction || u.confidence < thresholds.clarify || u.route.kind === "runtime" || u.route.kind === "continue")
-    return { kind: "job" };
+  if (u.outbound >= 0.5 || u.multiAction || u.confidence < thresholds.clarify || u.route.kind === "runtime") return { kind: "job" };
+  // A confident `continue` may answer a job's open question; anything less is kept as a job, as before.
+  if (u.route.kind === "continue") return u.confidence >= thresholds.act ? { kind: "act", option } : { kind: "job" };
   if (u.route.kind === "clarify") return { kind: "ask", options: [] };
   if (u.route.kind === "chat" || u.route.kind === "status") return { kind: u.route.kind };
   // A plugin whose route is not enabled stays shadow-only, as in routing.

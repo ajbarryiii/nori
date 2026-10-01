@@ -628,3 +628,34 @@ test("routing waits while a contact's message is pending, and a plugin route dec
   await engine.processPending();
   assert.deepEqual([store.tasks()[0]?.state, reminders(store).length], ["cancelled", 0]);
 });
+
+test("a reminder delivered after a job's question gets the plain reply; the next reply reaches the job again", async t => {
+  const { engine, store, conversation, advance } = setup(t);
+  const task = store.addTask({ contactId: "owner", sourceGuid: null, text: "plan a trip", time: epoch, hint: null, failure: null, routable: false });
+  store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "question" } });
+  store.enqueue({ key: `task:${task.id}:turn:0:question`, contactId: "owner", target: owner.conversation, text: "Job #1 asks: Which city?",
+    kind: "reply", timer: null }, epoch);
+  engine.acceptPage("owner", page([message("remind me to stretch in 1 minute")]));
+  await engine.tick();
+  advance(60_000); await engine.tick();
+  assert.match(texts(store).at(-1)!, /^Reminder: stretch \(#1\)/);
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ action: "done", task_id: 1 }));
+  engine.acceptPage("owner", page([message("did it", 2, { sentAt: epoch + 120_000 })]));
+  await engine.processPending();
+  assert.deepEqual([store.task(task.id)?.input, reminders(store)[0]?.status], [null, "completed"]);
+  engine.acceptPage("owner", page([message("Lisbon", 3, { sentAt: epoch + 180_000 })]));
+  assert.match(store.task(task.id)?.input ?? "", /Lisbon/);
+});
+
+test("understanding can send a reply to the one job waiting on a question, after the agreement check", async t => {
+  const { engine, store, conversation, task } = await jobAskedThenNoriAsked(t);
+  store.updateTask(task.id, { outcome: "Which city?" });
+  conversation.understandings.push(understood("continue"));
+  engine.acceptPage("owner", page([message("Lisbon", 2, { sentAt: epoch + 120_000 })]));
+  await engine.processPending();
+  assert.deepEqual(conversation.proposals, ["send your reply to job #1 (which asked: “Which city?”)"]);
+  assert.match(store.task(task.id)?.input ?? "", /Lisbon/);
+  assert.equal(store.task(task.id)?.state, "routed");
+  assert.equal(store.tasks().length, 1);
+});
