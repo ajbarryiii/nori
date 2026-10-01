@@ -612,7 +612,8 @@ export class Engine {
   async routeTasks(router: IntentRouter | null, shouldContinue: () => boolean = () => true): Promise<void> {
     this.store.promoteToRuntime(this.activeContacts().filter(c => this.runtimeFor(c)).map(c => c.id));
     for (let n = 0; n < 5 && shouldContinue(); n++) {
-      const contacts = this.activeContacts();
+      // A contact's tasks wait while one of their messages is pending: it may cancel or change them.
+      const contacts = this.activeContacts().filter(c => !this.store.hasPendingMessages(c.id));
       const claim = this.store.claimUnroutedTask(contacts.map(c => c.id), contacts.filter(c => this.runtimeFor(c)).map(c => c.id),
         localDay(this.clock(), this.config.timezone), router ? this.config.jev?.dailyLimit ?? Infinity : 0);
       if (!claim) break;
@@ -626,7 +627,8 @@ export class Engine {
       // The task is already claimed, so finish it even if the lifecycle gate closed meanwhile; it would never be routed again.
       // A plugin interprets only the original text, so a job with queued follow-ups is left for the runtime.
       const plugin = decision && this.store.task(task.id)?.input === null && this.actionFor(contact, task, decision);
-      if (plugin) await this.dispatchTask(contact, task, plugin);
+      // A plugin route that cannot act yet, because a message arrived meanwhile, returns the task to routing.
+      if (plugin && !await this.dispatchTask(contact, task, plugin)) continue;
       // A retained plugin failure stays queued for review rather than being retried in the runtime.
       if (this.runtimeFor(contact) && this.store.task(task.id)?.failure === null) this.store.updateTask(task.id, { state: "routed" }, ["queued"]);
     }
@@ -641,20 +643,22 @@ export class Engine {
     return plugin?.interpret ? plugin : null;
   }
 
-  private async dispatchTask(contact: Contact, task: Task, plugin: ActionPlugin): Promise<void> {
+  /** Returns false when the task went back to routing because one of the contact's messages became pending. */
+  private async dispatchTask(contact: Contact, task: Task, plugin: ActionPlugin): Promise<boolean> {
     const id = plugin.manifest.id;
     const source = (now: number): DispatchSource => ({ contact, time: task.time, now, replyKey: n => `task:${task.id}:${n}`,
       timer: null, sourceGuid: task.sourceGuid });
-    if (this.store.task(task.id)?.state !== "queued") return;
+    if (this.store.task(task.id)?.state !== "queued") return true;
     let result: Command | Clarification | null;
     try { result = await this.host.interpret(plugin, source(this.clock()), task.text); }
-    catch { this.store.setTaskFailure(task.id, `${id}: interpret error`); return; }
+    catch { this.store.setTaskFailure(task.id, `${id}: interpret error`); return true; }
     // The plugin could not read it: the task stays queued, or goes to the runtime, as if Jev had abstained.
-    if (result === null) return;
-    const now = this.clock();
+    if (result === null) return true;
+    const now = this.clock(); let acted = true;
     this.store.transaction(() => {
       const current = this.store.task(task.id);
       if (current?.state !== "queued" || current.input !== null) return;
+      if (this.store.hasPendingMessages(contact.id)) { this.store.releaseRoutingClaim(task.id); acted = false; return; }
       if (isClarification(result)) {
         this.enqueue(source(now), `task:${task.id}:question`, result.clarify);
         // The question asks for a complete new request, so this job is closed rather than left waiting for a reply.
@@ -667,6 +671,7 @@ export class Engine {
       catch { this.store.setTaskFailure(task.id, `${id}: handler error`); return; }
       this.store.setTaskState(task.id, "queued", "completed");
     });
+    return acted;
   }
 
   /**

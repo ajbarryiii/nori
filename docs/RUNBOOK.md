@@ -210,7 +210,7 @@ The responder can run on the ChatGPT plan signed in to Nori's Codex home (see [C
 "responder": { "provider": "codex", "model": "gpt-6-luna", "timeoutMs": 90000, "dailyLimit": 300 }
 ```
 
-`codexPath` defaults to `runtime.codexPath`; set it when no runtime is configured. Each call is its own ephemeral, read-only thread with approvals set to never, and shell, apps, plugins, browser, computer use, image generation, sub-agents, memories, hooks, web search, and MCP servers disabled. Calls count against the plan's Codex allowance; Luna is the lightest model. The adapter was verified against `codex-cli 0.156.1` with live Luna turns, at roughly 2 to 4 seconds per turn.
+`codexPath` defaults to `runtime.codexPath`; set it when no runtime is configured. Each call is its own ephemeral, read-only thread with approvals set to never, and shell, apps, plugins, browser, computer use, image generation, sub-agents, memories, hooks, web search, and MCP servers disabled. Before using a connection, Nori reads Codex's effective configuration and refuses to use it if any MCP server is still enabled, for example one added in `/etc/codex/config.toml`; the responder then falls back to templates. Calls count against the plan's Codex allowance; Luna is the lightest model. The adapter was verified against `codex-cli 0.156.1` with live Luna turns, at roughly 2 to 4 seconds per turn.
 
 This signs a ChatGPT account into the assistant account. Anyone with access to that macOS account can use the plan. OpenAI's terms for driving Codex from a personal assistant process were not verified.
 

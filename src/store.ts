@@ -117,6 +117,10 @@ export class Store {
         CREATE TABLE usage (day TEXT NOT NULL, provider TEXT NOT NULL, calls INTEGER NOT NULL DEFAULT 0,
           failures INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY (day, provider)) STRICT;
+        -- Schema 2 counted the day's Jev routing calls in settings. They carry over so the daily limit is not reset.
+        INSERT INTO usage(day,provider,calls) SELECT substr(key,15),'jev',CAST(value AS INTEGER) FROM settings
+          WHERE substr(key,1,14)='routing-calls:';
+        DELETE FROM settings WHERE substr(key,1,14)='routing-calls:';
         PRAGMA user_version=3;
       `);
     });
@@ -304,6 +308,10 @@ export class Store {
     const key = `${name}:${day}`;
     this.db.prepare("DELETE FROM settings WHERE substr(key,1,?)=? AND key<>?").run(name.length + 1, `${name}:`, key);
     this.setSetting(key, String(this.daily(name, day) + amount));
+  }
+  /** Returns a claimed, still-queued task to routing, dropping its decision, so it is routed again later. */
+  releaseRoutingClaim(id: number): void {
+    this.db.prepare("UPDATE tasks SET route=NULL,route_attempted=0 WHERE id=? AND state='queued'").run(id);
   }
   /** A decision is kept only for a still-queued task; late advice cannot restore a cancelled one. */
   saveDecision(id: number, decision: RoutingDecision | null): void {

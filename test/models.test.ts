@@ -122,11 +122,14 @@ test("Jev checks return a probability or abstain", async () => {
 class FakeCodex implements RpcPort {
   calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   closed = false; threads = 0;
+  /** The effective configuration `config/read` reports. */
+  config: Record<string, unknown> = {};
   constructor(public handlers: RpcHandlers, public script: (rpc: FakeCodex, threadId: string, turnId: string) => void) {}
   emit(method: string, params: Record<string, unknown>) { this.handlers.notification?.(method, params); }
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
     this.calls.push({ method, params });
     if (method === "initialize") return { userAgent: "codex-test" };
+    if (method === "config/read") return { config: this.config, origins: {}, layers: null };
     if (method === "thread/start") return { thread: { id: `thread-${++this.threads}` } };
     if (method === "turn/start") {
       const threadId = String(params.threadId); const turnId = `turn-${this.threads}`;
@@ -156,9 +159,10 @@ test("Codex responder runs one read-only, ephemeral, tool-free turn per request"
   assert.deepEqual((await model.generate(request, signal))?.json, { reply: "hello" });
   assert.equal(made.length, 1);
   const rpc = made[0]!;
-  assert.deepEqual(rpc.calls.map(x => x.method), ["initialize", "initialized", "thread/start", "turn/start", "thread/unsubscribe",
+  assert.deepEqual(rpc.calls.map(x => x.method), ["initialize", "initialized", "config/read", "thread/start", "turn/start", "thread/unsubscribe",
     "thread/start", "turn/start", "thread/unsubscribe"]);
-  const thread = rpc.calls[2]!.params; const turn = rpc.calls[3]!.params;
+  assert.equal(rpc.calls[2]!.params.cwd, "/tmp/nori-scratch");
+  const thread = rpc.calls[3]!.params; const turn = rpc.calls[4]!.params;
   assert.deepEqual({ model: thread.model, cwd: thread.cwd, approvalPolicy: thread.approvalPolicy, sandbox: thread.sandbox,
     ephemeral: thread.ephemeral, baseInstructions: thread.baseInstructions },
   { model: "gpt-6-luna", cwd: "/tmp/nori-scratch", approvalPolicy: "never", sandbox: "read-only", ephemeral: true, baseInstructions: "You are Nori." });
@@ -306,4 +310,35 @@ test("a Codex responder turn that cannot be interrupted takes its connection dow
   assert.equal(await model.generate(request, signal), null);
   await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(stuck.made[0]!.closed, true);
+});
+
+test("the Codex responder refuses a connection whose effective configuration still has an MCP server", async () => {
+  for (const [servers, usable] of [[{ inherited: { command: "/usr/local/bin/tool" } }, false], [{ off: { command: "x", enabled: false } }, true],
+    [{}, true]] as const) {
+    const made = connector(finish("completed", '{"reply":"hi"}'));
+    const model = new CodexModel({ model: "gpt-6-luna", timeoutMs: 1000, cwd: "/tmp", connect: handlers => {
+      const rpc = made.connect(handlers); rpc.config = { mcp_servers: servers }; return rpc;
+    } });
+    assert.equal((await model.generate(request, signal)) !== null, usable, JSON.stringify(servers));
+    const rpc = made.made[0]!;
+    assert.equal(rpc.calls.some(x => x.method === "thread/start"), usable);
+    assert.equal(rpc.closed, !usable);
+    model.close();
+  }
+  // A configuration Codex cannot report is refused too.
+  const unreadable = connector(finish("completed", '{"reply":"hi"}'));
+  const model = new CodexModel({ model: "gpt-6-luna", timeoutMs: 1000, cwd: "/tmp", connect: handlers => {
+    const rpc = unreadable.connect(handlers); const original = rpc.request.bind(rpc);
+    rpc.request = async (method, params) => method === "config/read" ? {} : original(method, params);
+    return rpc;
+  } });
+  assert.equal(await model.generate(request, signal), null);
+});
+
+test("Jev distributions must name exactly the catalog's options", async () => {
+  const extra = { ...probabilities, unknown: 1 };
+  const bad = new JevUnderstander({ key: "k", model: "jev-test", timeoutMs: 500, fetch: capture(jevAnswer({
+    route: { type: "choice", choice: "reminders", confidence: 0.9, probabilities: extra }, multiple: { type: "noul", noul: 0 },
+    outbound: { type: "noul", noul: 0 } })).fetch });
+  assert.equal(await bad.understand(context, signal), null);
 });

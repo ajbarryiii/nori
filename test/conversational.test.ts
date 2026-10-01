@@ -363,11 +363,15 @@ test("version 2 databases migrate in place without replaying history", t => {
   const first = new Store(path); enroll(first); first.addMessage("owner", message("research laptops")); first.close();
   const old = new DatabaseSync(path);
   old.exec("DROP INDEX inbox_stage; ALTER TABLE inbox DROP COLUMN stage; ALTER TABLE inbox DROP COLUMN attempts; DROP TABLE usage; PRAGMA user_version=2;");
+  // Schema 2 counted the day's routing calls in settings; the new limit must not start over.
+  old.exec("INSERT INTO settings VALUES ('routing-calls:2026-09-28', '100')");
   old.close();
   const store = new Store(path);
   assert.equal(store.hasPendingMessages(), false);
+  assert.equal(store.callsToday("2026-09-28", "jev"), 100);
+  assert.equal(store.reserveCall("2026-09-28", "jev", 100), false);
+  assert.equal(store.setting("routing-calls:2026-09-28"), null);
   assert.deepEqual(store.recentTurns("owner", epoch - 1, 8).map(x => [x.from, x.text]), [["contact", "research laptops"]]);
-  assert.deepEqual(store.usage(localDay(epoch, config.timezone)), []);
   store.close();
   const check = new DatabaseSync(path);
   try { assert.equal(Number(check.prepare("PRAGMA user_version").get()!.user_version), 3); } finally { check.close(); }
@@ -592,4 +596,35 @@ test("with until, a delivery failure still rejects instead of ending as idle", a
   transport.readAfter = async (_conversation, cursor) => cursor === 0 ? page([message("status")]) : page([], cursor);
   await assert.rejects(runService({ config, store, transport, checkIdentity: () => {}, signal: new AbortController().signal, until: () => true,
     wait: async () => { await tick(); } }), /uncertain/i);
+});
+
+test("routing waits while a contact's message is pending, and a plugin route decided meanwhile does not act", async t => {
+  const { engine, store, conversation } = setup(t);
+  conversation.understandings.push(null);
+  engine.acceptPage("owner", page([message("please note buy milk")]));
+  await engine.processPending();
+  assert.deepEqual(store.unroutedTasks().map(x => x.text), ["please note buy milk"]);
+  const decision = { model: "jev-test", catalogVersion: "v", route: { kind: "action", pluginId: "reminders" } as Route, confidence: 1,
+    probabilities: {}, multiAction: false };
+  // While a later message is pending, the contact's tasks are not claimed at all.
+  let classified = 0;
+  let release!: (value: Understanding | null) => void;
+  conversation.understandings.push(() => new Promise(resolve => { release = resolve; }));
+  engine.acceptPage("owner", page([message("hmm hold on", 2)]));
+  const holding = engine.processPending();
+  while (!release) await tick();
+  await engine.routeTasks({ classify: async () => { classified++; return decision; } });
+  assert.equal(classified, 0);
+  release(understood("chat")); await holding;
+  // A cancellation that arrives while routing is deciding takes effect before the decided route can act.
+  const routing = engine.routeTasks({ classify: async () => {
+    engine.acceptPage("owner", page([message("cancel that please", 3)]));
+    return decision;
+  } });
+  await routing;
+  assert.equal(reminders(store).length, 0);
+  assert.equal(store.tasks()[0]?.state, "queued");
+  conversation.understandings.push(understood("cancel"));
+  await engine.processPending();
+  assert.deepEqual([store.tasks()[0]?.state, reminders(store).length], ["cancelled", 0]);
 });

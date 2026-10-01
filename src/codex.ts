@@ -482,6 +482,14 @@ export class CodexModel implements LanguageModel {
         // close() may have run while initialize was in flight; never keep an app-server nobody will close.
         if (this.closed) throw new Error("Codex responder closed during startup.");
         rpc.notify("initialized", {});
+        // A lower configuration layer can add MCP servers that the `mcp_servers={}` override does not remove, and their tools
+        // would bypass Nori. Only a connection whose effective configuration has no enabled MCP server is used.
+        const config = record(record(await rpc.request("config/read", { includeLayers: false, cwd: this.options.cwd }))?.config);
+        if (!config) throw new Error("Codex did not report its configuration.");
+        const servers = config.mcp_servers;
+        if (servers != null && (!record(servers) || Object.values(servers).some(server => record(server)?.enabled !== false)))
+          throw new Error("An MCP server is configured for the Codex responder.");
+        if (this.closed) throw new Error("Codex responder closed during startup.");
         this.rpc = rpc; return rpc;
       } catch (error) { rpc.close(); throw error; }
       finally { this.connecting = null; }

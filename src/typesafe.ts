@@ -33,12 +33,12 @@ export function probability(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
-/** A Choice answer whose choice and full distribution cover exactly `options` and sum to one. */
+/** A Choice answer whose choice and full distribution cover exactly `options`, with no other keys, and sum to one. */
 export function choiceAnswer<T extends string>(answers: Record<string, unknown>, key: string, options: readonly T[]):
   { choice: T; confidence: number; probabilities: Record<T, number> } | null {
   const answer = record(answers[key]); const probabilities = record(answer?.probabilities);
   if (answer?.type !== "choice" || !options.includes(answer.choice as T) || !probability(answer.confidence) || !probabilities
-    || !options.every(x => probability(probabilities[x]))
+    || Object.keys(probabilities).length !== options.length || !options.every(x => probability(probabilities[x]))
     || Math.abs(options.reduce((sum, x) => sum + Number(probabilities[x]), 0) - 1) > 0.01) return null;
   return { choice: answer.choice as T, confidence: answer.confidence,
     probabilities: Object.fromEntries(options.map(x => [x, Number(probabilities[x])])) as Record<T, number> };

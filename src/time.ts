@@ -35,8 +35,11 @@ export function resolveWhen(when: When, sentAt: number, timezone: string): numbe
       if (day === "today") at = on(today);
       else if (day === "tomorrow") at = on(today.add({ days: 1 }));
       else if (WEEKDAYS.includes(day)) {
+        // Whether the time has passed is decided on the local clock, so a DST gap or repeat earlier today cannot block next
+        // week's date; only the target date itself is checked for one.
         let date = today.add({ days: (WEEKDAYS.indexOf(day) + 1 - today.dayOfWeek + 7) % 7 });
-        if (on(date) <= sentAt) date = date.add({ days: 7 });
+        if (Temporal.PlainDateTime.compare(date.toPlainDateTime({ hour, minute }), zoned(sentAt, timezone).toPlainDateTime()) <= 0)
+          date = date.add({ days: 7 });
         at = on(date);
       } else if (/^\d{4}-\d{2}-\d{2}$/.test(day)) at = on(Temporal.PlainDate.from(day));
       else return null;
@@ -91,20 +94,26 @@ export function mentionsClock(text: string, at: number, timezone: string): boole
 }
 
 const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
-const MONTH_DAY = /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\.?\s+(\d{1,2})(?!\d)/g;
-const NUMERIC_DATE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?![\d/])/g;
+const MONTH_DAY = /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\.?\s+(\d{1,2})(?!\d)(?:st|nd|rd|th)?(?:,?\s+(\d{4})(?!\d))?/g;
+const NUMERIC_DATE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/])/g;
 
-/** Explicit calendar dates in `text` ("Sep 29", "September 29", "9/29"), as month and day. */
-function explicitDates(text: string): Array<{ month: number; day: number }> {
+/** Explicit calendar dates in `text` ("Sep 29", "September 29, 2026", "9/29", "9/29/2026"), with the year when one is given. */
+function explicitDates(text: string): Array<{ month: number; day: number; year: number | null }> {
   const t = text.toLowerCase().replace(/[  ]/g, " ");
-  return [...[...t.matchAll(MONTH_DAY)].map(([, month, day]) => ({ month: MONTHS.findIndex(name => name.startsWith(month!)) + 1, day: Number(day) })),
-    ...[...t.matchAll(NUMERIC_DATE)].map(([, month, day]) => ({ month: Number(month), day: Number(day) }))];
+  const year = (value: string | undefined) => value === undefined ? null : value.length === 2 ? 2000 + Number(value) : Number(value);
+  return [...[...t.matchAll(MONTH_DAY)].map(([, month, day, y]) => ({ month: MONTHS.findIndex(name => name.startsWith(month!)) + 1, day: Number(day), year: year(y) })),
+    ...[...t.matchAll(NUMERIC_DATE)].map(([, month, day, y]) => ({ month: Number(month), day: Number(day), year: year(y) }))];
 }
 
-/** True when `text` names `at`'s calendar date explicitly and no other date, so it reads the same on any day. */
-export function mentionsDate(text: string, at: number, timezone: string): boolean {
+/**
+ * True when `text` names `at`'s calendar date explicitly and no other date, so it reads the same on any day. A stated year
+ * must be `at`'s; given `from`, the year is required when `at` falls in a different year.
+ */
+export function mentionsDate(text: string, at: number, timezone: string, from?: number): boolean {
   const target = zoned(at, timezone); const dates = explicitDates(text);
-  return dates.length > 0 && dates.every(x => x.month === target.month && x.day === target.day);
+  const needYear = from !== undefined && zoned(from, timezone).year !== target.year;
+  return dates.length > 0 && dates.every(x => x.month === target.month && x.day === target.day
+    && (x.year === null ? !needYear : x.year === target.year));
 }
 
 /**

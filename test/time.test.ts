@@ -73,3 +73,23 @@ test("durable replies must name the calendar date; absolute descriptions read th
   assert.equal(shortWhen(tuesday, epoch, tz), "Tue, Sep 29 at 9:00 AM");
   assert.equal(shortWhen(at("2027-01-05T17:00:00Z"), epoch, tz), "Tue, Jan 5, 2027 at 9:00 AM");
 });
+
+test("an explicit year must be the reminder's, and a reminder in another year needs one", () => {
+  const nextYear = at("2027-01-05T17:00:00Z");
+  for (const text of ["Tue, Jan 5, 2027 at 9 AM", "January 5 2027 at 9", "1/5/2027 at 9 AM"])
+    assert.ok(mentionsDate(text, nextYear, tz, epoch), text);
+  for (const text of ["Jan 5, 2026 at 9 AM", "1/5/2026 at 9 AM", "Jan 5 at 9 AM"]) assert.ok(!mentionsDate(text, nextYear, tz, epoch), text);
+  assert.ok(mentionsDate("Jan 5 at 9 AM", nextYear, tz, at("2027-01-01T17:00:00Z")));
+  assert.ok(!mentionsDay("Jan 5, 2026 at 9 AM", nextYear, epoch, tz));
+  assert.ok(mentionsDate("Sep 29, 2026 at 9 AM", at("2026-09-29T16:00:00Z"), tz, epoch));
+  assert.ok(!mentionsDate("Sep 29, 2027 at 9 AM", at("2026-09-29T16:00:00Z"), tz, epoch));
+});
+
+test("a weekday whose time already passed today means next week, even across a DST change today", () => {
+  // Sunday, November 1, 2026 at noon: 1:30 AM fell in today's repeated hour. Next Sunday is a normal day.
+  assert.equal(resolveWhen({ kind: "at", day: "sunday", hour: 1, minute: 30 }, at("2026-11-01T20:00:00Z"), tz), at("2026-11-08T09:30:00Z"));
+  // Sunday, March 14, 2027 at noon: 2:30 AM did not exist today.
+  assert.equal(resolveWhen({ kind: "at", day: "sunday", hour: 2, minute: 30 }, at("2027-03-14T19:00:00Z"), tz), at("2027-03-21T09:30:00Z"));
+  // A gap or repeat on the target date itself is still refused.
+  assert.equal(resolveWhen({ kind: "at", day: "sunday", hour: 1, minute: 30 }, at("2026-10-28T20:00:00Z"), tz), null);
+});

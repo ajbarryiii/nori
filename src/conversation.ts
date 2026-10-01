@@ -80,7 +80,7 @@ function carriesFacts(text: string, draft: Draft, c: TurnContext): boolean {
   }
   // A reply may be read on a later day than it was written, so a stated time carries its date and no relative day.
   if (draft.times.length && RELATIVE_DAY.test(text)) return false;
-  return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDate(text, at, c.timezone) && mentionsDay(text, at, c.now, c.timezone));
+  return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDate(text, at, c.timezone, c.now) && mentionsDay(text, at, c.now, c.timezone));
 }
 
 /**
