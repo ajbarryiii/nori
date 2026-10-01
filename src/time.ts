@@ -70,6 +70,17 @@ export function describeWhen(at: number, from: number, timezone: string): string
   return target.year === base.year ? `${weekday}, ${date} at ${clock}` : `${weekday}, ${date}, ${target.year} at ${clock}`;
 }
 
+/** An absolute description that reads the same on any day, e.g. "Tue, Sep 29 at 9:00 AM"; the year appears when it differs from `from`'s. */
+export function shortWhen(at: number, from: number, timezone: string): string {
+  const year = zoned(at, timezone).year !== zoned(from, timezone).year ? `, ${zoned(at, timezone).year}` : "";
+  return `${format(at, timezone, { weekday: "short", month: "short", day: "numeric" })}${year} at ${clockText(at, timezone)}`;
+}
+
+/** A compact local send time for conversation lines, e.g. "Mon, Sep 28, 8:59 AM". */
+export function localStamp(at: number, timezone: string): string {
+  return `${format(at, timezone, { weekday: "short", month: "short", day: "numeric" })}, ${clockText(at, timezone)}`;
+}
+
 /** True when `text` states the same local clock time as `at` (e.g. "9 AM", "9:00am", "9 a.m."). */
 export function mentionsClock(text: string, at: number, timezone: string): boolean {
   const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, hour: "numeric", minute: "2-digit", hour12: true }).formatToParts(at);
@@ -82,6 +93,19 @@ export function mentionsClock(text: string, at: number, timezone: string): boole
 const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 const MONTH_DAY = /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\.?\s+(\d{1,2})(?!\d)/g;
 const NUMERIC_DATE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?![\d/])/g;
+
+/** Explicit calendar dates in `text` ("Sep 29", "September 29", "9/29"), as month and day. */
+function explicitDates(text: string): Array<{ month: number; day: number }> {
+  const t = text.toLowerCase().replace(/[  ]/g, " ");
+  return [...[...t.matchAll(MONTH_DAY)].map(([, month, day]) => ({ month: MONTHS.findIndex(name => name.startsWith(month!)) + 1, day: Number(day) })),
+    ...[...t.matchAll(NUMERIC_DATE)].map(([, month, day]) => ({ month: Number(month), day: Number(day) }))];
+}
+
+/** True when `text` names `at`'s calendar date explicitly and no other date, so it reads the same on any day. */
+export function mentionsDate(text: string, at: number, timezone: string): boolean {
+  const target = zoned(at, timezone); const dates = explicitDates(text);
+  return dates.length > 0 && dates.every(x => x.month === target.month && x.day === target.day);
+}
 
 /**
  * True when `text` places `at` on the right day: it names that day (today, tomorrow, its weekday, or its date)
@@ -97,17 +121,8 @@ export function mentionsDay(text: string, at: number, from: number, timezone: st
   if (has("tomorrow") && days !== 1) return false;
   if (WEEKDAYS.some(w => w !== weekday && (has(w) || has(w.slice(0, 3))))) return false;
   // Every explicit calendar date must be the target's; one that is counts as naming the day.
-  const target = zoned(at, timezone); let dated = false;
-  for (const [, month, day] of t.matchAll(MONTH_DAY)) {
-    if (MONTHS.findIndex(name => name.startsWith(month!)) + 1 !== target.month || Number(day) !== target.day) return false;
-    dated = true;
-  }
-  for (const [, month, day] of t.matchAll(NUMERIC_DATE)) {
-    if (Number(month) !== target.month || Number(day) !== target.day) return false;
-    dated = true;
-  }
-  if (days === 0 || dated) return true;
-  const dates = [format(at, timezone, { month: "short", day: "numeric" }), format(at, timezone, { month: "long", day: "numeric" })]
-    .map(x => x.toLowerCase().replace(/ /g, "\\.? "));
-  return (days === 1 && has("tomorrow")) || has(weekday) || has(weekday.slice(0, 3)) || dates.some(has);
+  const dates = explicitDates(text);
+  if (dates.length && !mentionsDate(text, at, timezone)) return false;
+  if (days === 0 || dates.length) return true;
+  return (days === 1 && has("tomorrow")) || has(weekday) || has(weekday.slice(0, 3));
 }

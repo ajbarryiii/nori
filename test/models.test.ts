@@ -88,7 +88,7 @@ test("Jev understanding asks the catalog Choice and two Nouls with conversation 
   assert.match(String(state.local_time), /Monday, September 28, 2026/);
   assert.deepEqual(state.tracking, ["1 active tasks.", "#2: stretch"]);
   assert.deepEqual(state.open_jobs, [{ number: "#3", request: "research laptops", state: "routed" }]);
-  assert.deepEqual(state.recent_conversation, [{ from: "nori", text: "Anything else?" }]);
+  assert.deepEqual(state.recent_conversation, [{ from: "nori", sent: "Mon, Sep 28, 8:59 AM", text: "Anything else?" }]);
   assert.deepEqual(questions.route!.criteria, { reminders: "Reminders.", chat: "Small talk.", clarify: "Unclear." });
   assert.equal(questions.multiple?.type, "noul"); assert.equal(questions.outbound?.type, "noul");
   assert.deepEqual(meter.records, [{ provider: "jev", ok: true, usage: { input: 400, output: 30 } }]);
@@ -233,4 +233,33 @@ test("usage meters are durable daily ceilings that reset at local midnight", t =
   now += 15 * 3_600_000;
   assert.equal(localDay(now, config.timezone), "2026-09-29");
   assert.equal(meter.reserve("jev"), true);
+});
+
+test("a Codex turn confirmed only after a timeout is still interrupted", async () => {
+  // The start response arrives late; the turn's id comes from that response.
+  let respond!: () => void; const late = connector(() => {});
+  const lateModel = new CodexModel({ model: "gpt-6-luna", timeoutMs: 50, cwd: "/tmp", connect: handlers => {
+    const rpc = late.connect(handlers); const original = rpc.request.bind(rpc);
+    rpc.request = async (method, params) => method === "turn/start"
+      ? new Promise<unknown>(resolve => { rpc.calls.push({ method, params }); respond = () => resolve({ turn: { id: "turn-late" } }); })
+      : original(method, params);
+    return rpc;
+  } });
+  assert.equal(await lateModel.generate(request, signal), null);
+  respond(); await new Promise<void>(resolve => setImmediate(resolve));
+  assert.ok(late.made[0]!.calls.some(x => x.method === "turn/interrupt" && x.params.turnId === "turn-late"));
+  // The start response never arrives, but a turn/started notification names the turn.
+  const noticed = connector(() => {});
+  const noticedModel = new CodexModel({ model: "gpt-6-luna", timeoutMs: 50, cwd: "/tmp", connect: handlers => {
+    const rpc = noticed.connect(handlers); const original = rpc.request.bind(rpc);
+    rpc.request = async (method, params) => {
+      if (method !== "turn/start") return original(method, params);
+      rpc.calls.push({ method, params });
+      rpc.emit("turn/started", { threadId: params.threadId, turn: { id: "turn-noticed" } });
+      return new Promise<unknown>(() => {});
+    };
+    return rpc;
+  } });
+  assert.equal(await noticedModel.generate(request, signal), null);
+  assert.ok(noticed.made[0]!.calls.some(x => x.method === "turn/interrupt" && x.params.turnId === "turn-noticed"));
 });

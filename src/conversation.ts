@@ -2,9 +2,11 @@ import type { ConversationPort, Draft, ExtractRequest, Judge, LanguageModel, Thr
   Understanding } from "./contracts.js";
 import { object as record } from "./config.js";
 import { optionId } from "./host.js";
-import { clockText, describeWhen, localNow, mentionsClock, mentionsDay } from "./time.js";
+import { clockText, localNow, localStamp, mentionsClock, mentionsDate, mentionsDay, shortWhen } from "./time.js";
 
 const MAX_REPLY = 700;
+/** Day words whose meaning depends on when a reply is read. */
+const RELATIVE_DAY = /\b(?:today|tonight|tomorrow|yesterday|this (?:morning|afternoon|evening))\b/i;
 /** Conversational options the engine itself can change state for; plugins are the others that act. */
 const ENGINE_CHANGES = new Set(["pause", "resume", "cancel"]);
 
@@ -50,7 +52,7 @@ export function gate(u: Understanding, thresholds: Thresholds, routes: Readonly<
 
 const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
 const turnLines = (c: TurnContext) => c.turns.length
-  ? c.turns.map(t => `${t.from === "contact" ? "Them" : "Nori"}: ${clip(t.text, 400)}`).join("\n") : "none";
+  ? c.turns.map(t => `${t.from === "contact" ? "Them" : "Nori"} (${localStamp(t.at, c.timezone)}): ${clip(t.text, 400)}`).join("\n") : "none";
 const jobLines = (c: TurnContext) => c.jobs.length ? c.jobs.slice(0, 5).map(j => `#${j.number} ${clip(j.text, 120)} (${j.state})`).join("\n") : "none";
 /** Relative words in the message are read from when it was sent. */
 const sent = (c: TurnContext) => `The message was sent ${localNow(c.sentAt, c.timezone)} (${c.timezone}).`;
@@ -76,7 +78,9 @@ function carriesFacts(text: string, draft: Draft, c: TurnContext): boolean {
     const pattern = mention.startsWith("#") ? `${mention}(?!\\d)` : `\\b${mention.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`;
     if (!new RegExp(pattern, "i").test(text)) return false;
   }
-  return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDay(text, at, c.now, c.timezone));
+  // A reply may be read on a later day than it was written, so a stated time carries its date and no relative day.
+  if (draft.times.length && RELATIVE_DAY.test(text)) return false;
+  return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDate(text, at, c.timezone) && mentionsDay(text, at, c.now, c.timezone));
 }
 
 /**
@@ -110,11 +114,11 @@ export class Conversation implements ConversationPort {
   private replyPrompt(draft: Draft, c: TurnContext): string {
     const did = draft.kind === "result" ? "Nori has already done exactly what the reply says, and nothing else." : "Nori changed nothing; the reply answers the person.";
     const facts = { what_happened: did, reply_written_by_code: draft.template,
-      ...(draft.times.length ? { times: draft.times.map(at => describeWhen(at, c.now, c.timezone)) } : {}),
+      ...(draft.times.length ? { times: draft.times.map(at => shortWhen(at, c.now, c.timezone)) } : {}),
       must_mention: [...draft.mentions, ...draft.times.map(at => clockText(at, c.timezone))] };
     return ["Rewrite Nori's reply to the person's latest message in Nori's voice.",
       "- Keep every fact in <facts>. Do not add promises, actions, or details that are not there.",
-      "- Include every value in must_mention exactly as written, and name each time's day.",
+      "- Include every value in must_mention exactly as written, and give each time with its date as in times. Never say today, tonight, or tomorrow: the reply may be read on another day.",
       "- Keep numbers like #3 so the person can refer to them later.",
       "- Nori keeps its own lists. Never say a task is in Apple Reminders or Calendar.",
       "- Do not ask the person to confirm anything.", now(c), "",

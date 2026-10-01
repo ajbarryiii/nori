@@ -84,7 +84,7 @@ test("extraction frames the message, conversation, and plugin data as data under
   assert.match(sent.prompt, /can you remind me to call mom tomorrow morning/);
   assert.match(sent.prompt, /Monday, September 28, 2026/);
   assert.match(sent.prompt, /#4 stretch/);
-  assert.match(sent.prompt, /Nori: Hi! What's up\?/);
+  assert.match(sent.prompt, /Nori \(Mon, Sep 28, 8:59 AM\): Hi! What's up\?/);
   assert.match(sent.system, /data/i);
   assert.equal(await build(new FakeModel([null])).conversation.extract(c, { instructions: "x", schema, data: "" }, signal), null);
 });
@@ -92,15 +92,15 @@ test("extraction frames the message, conversation, and plugin data as data under
 test("a phrased result must keep the committed numbers and times", async () => {
   const due = at("2026-09-29T16:00:00Z");
   const saved = draft({ template: "Saved locally #3: call mom. I'll remind you Sep 29, 9:00 AM PDT.", times: [due], mentions: ["#3"] });
-  const good = "Got it! I'll nudge you to call mom tomorrow at 9 AM (#3).";
+  const good = "Got it! I'll nudge you to call mom on Tue, Sep 29 at 9 AM (#3).";
   const built = build(new FakeModel([{ reply: good }]));
   assert.equal(await built.conversation.phrase(saved, context(), signal), good);
   const sent = built.model.requests[0]!;
   assert.equal(sent.purpose, "reply"); assert.equal(sent.schema, REPLY_SCHEMA);
   assert.match(sent.prompt, /Saved locally #3/); assert.match(sent.prompt, /9:00 AM/);
   assert.deepEqual(built.judge.committed, [saved.template]);
-  for (const reply of ["Got it, I'll remind you tomorrow at 9 AM.", "Saved #3 for tomorrow at 10 AM.", "Saved #3 for today at 9 AM.",
-    "Saved #3 for tomorrow at 9 AM, next to #8.", `Saved #3 tomorrow at 9 AM. ${"blah ".repeat(200)}`, "", 42])
+  for (const reply of ["Got it, I'll remind you Sep 29 at 9 AM.", "Saved #3 for Sep 29 at 10 AM.", "Saved #3 for Sep 28 at 9 AM.",
+    "Saved #3 for Sep 29 at 9 AM, next to #8.", `Saved #3 Sep 29 at 9 AM. ${"blah ".repeat(200)}`, "", 42])
     assert.equal(await build(new FakeModel([{ reply }])).conversation.phrase(saved, context(), signal), null, String(reply).slice(0, 40));
   assert.equal(await build(new FakeModel([null])).conversation.phrase(saved, context(), signal), null);
 });
@@ -143,14 +143,16 @@ test("answers and chat are screened against nothing committed", async () => {
   }
 });
 
-test("phrased days are measured from when the reply is written, not when the message was sent", async () => {
-  // Sent Monday at 11:59 PM, written Tuesday at 12:01 AM, for a reminder on Tuesday at 9 AM.
+test("phrased replies name each time's calendar date and use no relative day, so they read the same on any day", async () => {
+  // Sent Monday at 11:59 PM, written Tuesday at 12:01 AM, for a reminder on Tuesday at 9 AM; it may be read later still.
   const sentAt = at("2026-09-29T06:59:00Z"); const now = at("2026-09-29T07:01:00Z"); const due = at("2026-09-29T16:00:00Z");
   const saved = draft({ template: "Saved locally #3: call mom. I'll remind you Sep 29, 9:00 AM PDT.", times: [due], mentions: ["#3"] });
   const c = context({ sentAt, now });
-  assert.equal(await build(new FakeModel([{ reply: "Saved #3: I'll remind you tomorrow at 9 AM." }])).conversation.phrase(saved, c, signal), null);
-  const right = build(new FakeModel([{ reply: "Saved #3: I'll remind you today at 9 AM." }]));
-  assert.equal(await right.conversation.phrase(saved, c, signal), "Saved #3: I'll remind you today at 9 AM.");
-  assert.match(right.model.requests[0]!.prompt, /"today \(Tue, Sep 29\) at 9:00 AM"/);
+  for (const reply of ["Saved #3: I'll remind you tomorrow at 9 AM.", "Saved #3: I'll remind you today at 9 AM.",
+    "Saved #3: I'll remind you tomorrow (Sep 29) at 9 AM.", "Saved #3: I'll remind you Tuesday at 9 AM."])
+    assert.equal(await build(new FakeModel([{ reply }])).conversation.phrase(saved, c, signal), null, reply);
+  const right = build(new FakeModel([{ reply: "Saved #3: I'll remind you Tuesday, Sep 29 at 9 AM." }]));
+  assert.equal(await right.conversation.phrase(saved, c, signal), "Saved #3: I'll remind you Tuesday, Sep 29 at 9 AM.");
+  assert.match(right.model.requests[0]!.prompt, /"Tue, Sep 29 at 9:00 AM"/);
   assert.match(right.model.requests[0]!.prompt, /Tuesday, September 29, 2026/);
 });

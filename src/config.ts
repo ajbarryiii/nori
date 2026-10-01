@@ -168,9 +168,12 @@ export function parseConfig(value: unknown): Config {
  */
 export function parseConsoleConfig(input: unknown, options: { dataDir: string; username: string }): Config {
   const source = record(input) ? input : {};
+  // The runtime is dropped, so a Codex responder that inherits its CLI takes the path now.
+  const responder = record(source.responder) && source.responder.provider === "codex" && source.responder.codexPath == null
+    && record(source.runtime) ? { ...source.responder, codexPath: source.runtime.codexPath } : source.responder;
   return parseConfig({ assistantUser: options.username, contacts: [{ ...CONSOLE_CONTACT, handles: [...CONSOLE_CONTACT.handles] }],
     dataDir: options.dataDir, imsgPath: "/dev/null", pollMs: 1000, timezone: source.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
-    quietHours: source.quietHours ?? null, jev: source.jev ?? null, responder: source.responder ?? null });
+    quietHours: source.quietHours ?? null, jev: source.jev ?? null, responder: responder ?? null });
 }
 
 export function requireAssistantUser(config: Config, actual = userInfo().username): void {

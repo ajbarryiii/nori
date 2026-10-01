@@ -220,6 +220,7 @@ test("conversational interpret extracts details and code resolves the time", asy
   assert.equal(requests[0]!.schema, EXTRACT_SCHEMA);
   assert.match(requests[0]!.data, /#4 stretch \(reminder today \(Mon, Sep 28\) at 1:00 PM\)/);
   assert.match(requests[0]!.instructions, /time/);
+  assert.match(requests[0]!.instructions, /earlier message.*YYYY-MM-DD/s);
 });
 
 test("polite exact grammar needs no model even when one is available", async () => {

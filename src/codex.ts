@@ -495,6 +495,7 @@ export class CodexModel implements LanguageModel {
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
     let ok = false; let usage: TokenUsage | null = null;
     let rpc: RpcPort | null = null; let threadId: string | null = null; let turnId: string | null = null; let status: string | null = null;
+    let starting: Promise<unknown> | null = null;
     const events: Array<{ method: string; params: Record<string, unknown> }> = [];
     let wake = () => {};
     const listener = (method: string, params: Record<string, unknown>) => { events.push({ method, params }); wake(); };
@@ -507,8 +508,9 @@ export class CodexModel implements LanguageModel {
         ephemeral: true, baseInstructions: request.system, serviceName: "nori" })));
       threadId = text(record(thread?.thread)?.id);
       if (!threadId) return null;
-      const turn = record(await within(rpc.request("turn/start", { threadId, input: [{ type: "text", text: request.prompt, text_elements: [] }],
-        outputSchema: request.schema, effort: "low" })));
+      starting = rpc.request("turn/start", { threadId, input: [{ type: "text", text: request.prompt, text_elements: [] }],
+        outputSchema: request.schema, effort: "low" });
+      const turn = record(await within(starting));
       turnId = text(record(turn?.turn)?.id);
       if (!turnId) return null;
       let reply: string | null = null; let seen = 0;
@@ -534,7 +536,16 @@ export class CodexModel implements LanguageModel {
       ok = true;
       return { model, json, usage: usage ?? { input: 0, output: 0 } };
     } catch {
-      if (rpc && threadId && turnId && status === null) rpc.request("turn/interrupt", { threadId, turnId }).catch(() => {});
+      // The turn may be running even if its start was confirmed too late: take its id from a notification, or from the late
+      // response, and interrupt it so it stops using the plan's allowance.
+      if (rpc && threadId && status === null) {
+        const live = rpc; const thread = threadId;
+        const interrupt = (id: string) => { live.request("turn/interrupt", { threadId: thread, turnId: id }).catch(() => {}); };
+        const noticed = turnId ?? events.map(e => e.method === "turn/started" && e.params.threadId === thread ? text(record(e.params.turn)?.id) : null)
+          .find((id): id is string => id !== null) ?? null;
+        if (noticed) interrupt(noticed);
+        else starting?.then(response => { const id = text(record(record(response)?.turn)?.id); if (id) interrupt(id); }, () => {});
+      }
       return null;
     } finally {
       this.listeners.delete(listener); release();

@@ -91,6 +91,10 @@ test("console configuration ignores live identity, contacts, paths, and the runt
   assert.deepEqual(parsed.contacts, [CONSOLE_CONTACT]); assert.equal(parsed.timezone, "Europe/Paris");
   assert.equal(parsed.runtime, null);
   assert.equal(parseConsoleConfig({}, { dataDir: "/tmp/nori-console", username: "dev" }).jev, null);
+  // A Codex responder that inherits the live runtime's CLI keeps it, though the runtime itself is dropped.
+  const inherited = parseConsoleConfig({ ...input, jev: { model: "jev-1.13.0" }, runtime: { codexPath: "/usr/local/bin/codex" },
+    responder: { provider: "codex", model: "gpt-6-luna" } }, { dataDir: "/tmp/nori-console", username: "dev" });
+  assert.deepEqual([inherited.runtime, inherited.responder?.provider === "codex" && inherited.responder.codexPath], [null, "/usr/local/bin/codex"]);
 });
 
 test("stdio RPC correlates responses and rejects unknown inbound calls", async t => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { clockText, describeWhen, localNow, mentionsClock, mentionsDay, resolveWhen } from "../src/time.js";
+import { clockText, describeWhen, localNow, mentionsClock, mentionsDate, mentionsDay, resolveWhen, shortWhen } from "../src/time.js";
 import { epoch } from "./helpers.js";
 
 // epoch is Monday, September 28, 2026 at 9:00 AM in America/Los_Angeles.
@@ -64,4 +64,12 @@ test("reply checks reject an explicit calendar date other than the committed one
   for (const text of ["Tuesday, October 6 at 9 AM", "Tue, Oct. 6 at 9 AM", "tomorrow (Sept 30) at 9 AM"]) assert.ok(!mentionsDay(text, tomorrow, epoch, tz), text);
   for (const text of ["Tuesday, Sep 29 at 9 AM", "tomorrow, September 29, at 9 AM", "9/29 at 9 AM"]) assert.ok(mentionsDay(text, tomorrow, epoch, tz), text);
   assert.ok(mentionsDay("today, Sep 28, at 10 AM", today, epoch, tz));
+});
+
+test("durable replies must name the calendar date; absolute descriptions read the same on any day", () => {
+  const tuesday = at("2026-09-29T16:00:00Z");
+  for (const text of ["Tue, Sep 29 at 9 AM", "on September 29 at 9", "9/29 at 9 AM"]) assert.ok(mentionsDate(text, tuesday, tz), text);
+  for (const text of ["tomorrow at 9 AM", "Tuesday at 9 AM", "Sep 30 at 9 AM", "Sep 29 or Sep 30"]) assert.ok(!mentionsDate(text, tuesday, tz), text);
+  assert.equal(shortWhen(tuesday, epoch, tz), "Tue, Sep 29 at 9:00 AM");
+  assert.equal(shortWhen(at("2027-01-05T17:00:00Z"), epoch, tz), "Tue, Jan 5, 2027 at 9:00 AM");
 });

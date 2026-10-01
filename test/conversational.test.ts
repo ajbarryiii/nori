@@ -534,3 +534,11 @@ test("replies are written with the current time, while the message keeps its own
   await engine.processPending();
   assert.deepEqual([conversation.phrased[0]?.sentAt, conversation.phrased[0]?.now], [epoch, epoch + 15 * 3_600_000]);
 });
+
+test("a Nori message whose send has begun is part of the conversation its answer is read with", t => {
+  const store = new Store(":memory:"); t.after(() => store.close()); enroll(store);
+  store.enqueue({ key: "reply:q", contactId: "owner", target: owner.conversation, text: "Did you mean: …? Say yes, or tell me what to change.",
+    kind: "reply", timer: null }, epoch);
+  store.claimOutgoing(epoch + 1_000, () => true);
+  assert.deepEqual(store.recentTurns("owner", epoch - 1, 8).map(x => [x.from, x.at]), [["nori", epoch + 1_000]]);
+});

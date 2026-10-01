@@ -104,6 +104,7 @@ const INSTRUCTIONS = [
   "- snooze_minutes: a snooze given as a duration, in minutes.",
   "- missing: what Nori would need to ask. Empty if nothing is missing.",
   "If Nori just asked a question in the conversation, the message is probably the answer to it: combine them.",
+  "Each conversation line shows when it was sent. Read relative words like tomorrow from the message they appear in: when that is an earlier message, give day as the YYYY-MM-DD date they meant.",
   "<data> lists the person's active reminders and notes by number.",
 ].join("\n");
 const QUESTIONS: Record<Missing, string> = { which_task: "Which reminder do you mean? Tell me its number, or say ‘list’ to see them.",

@@ -1,6 +1,6 @@
 import type { IntentRouter, Judge, RouteCatalog, RoutingDecision, TurnContext, Understander, Understanding } from "./contracts.js";
 import { object as record } from "./config.js";
-import { localNow } from "./time.js";
+import { localNow, localStamp } from "./time.js";
 import { choiceAnswer, noulAnswer, systemOne, type TypeSafeOptions } from "./typesafe.js";
 
 const MULTIPLE = { type: "noul", instructions: "Does `request` ask for more than one separate action?",
@@ -50,7 +50,7 @@ export function jevState(context: TurnContext): Record<string, unknown> {
     local_time: localNow(context.sentAt, context.timezone),
     tracking: context.summary.slice(0, 20).map(line => clip(line, 160)),
     open_jobs: context.jobs.slice(0, 5).map(job => ({ number: `#${job.number}`, request: clip(job.text, 120), state: job.state })),
-    recent_conversation: context.turns.slice(-6).map(turn => ({ from: turn.from, text: clip(turn.text) })),
+    recent_conversation: context.turns.slice(-6).map(turn => ({ from: turn.from, sent: localStamp(turn.at, context.timezone), text: clip(turn.text) })),
   };
 }
 
