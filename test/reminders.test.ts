@@ -308,3 +308,13 @@ test("without the responder, an implicit reminder reference is left for handle t
   const plain = { ...ctx, extract: null } as PluginContext;
   assert.deepEqual(await plugin.interpret!("please snooze 20m", plain), { kind: "snooze", id: null, minutes: 20 });
 });
+
+test("describe shortens a long title so the account stays within its limit", () => {
+  const long = "y".repeat(4000);
+  const { ctx } = talking([item(1, long, epoch)], null);
+  for (const command of [{ kind: "note", title: long }, { kind: "done", id: 1 }, { kind: "snooze", id: 1, minutes: 20 }]) {
+    const { description } = plugin.describe!(command, ctx);
+    assert.ok(description.length < 200, command.kind);
+    assert.match(description, /y…/);
+  }
+});

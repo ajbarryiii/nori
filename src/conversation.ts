@@ -2,7 +2,7 @@ import type { ConversationPort, Draft, ExtractRequest, Judge, LanguageModel, Thr
   Understanding } from "./contracts.js";
 import { object as record } from "./config.js";
 import { optionId } from "./host.js";
-import { clockText, localNow, localStamp, mentionsClock, mentionsDate, mentionsDay, shortWhen } from "./time.js";
+import { clockText, localNow, localStamp, mentionsClock, mentionsDate, mentionsDay, shortWhen, statesOnly } from "./time.js";
 
 const MAX_REPLY = 700;
 /** Day words whose meaning depends on when a reply is read. */
@@ -62,7 +62,7 @@ const now = (c: TurnContext) => `Local time now: ${localNow(c.now, c.timezone)} 
 const message = (c: TurnContext) => `<message>\n${c.text}\n</message>`;
 const conversation = (c: TurnContext) => `<conversation>\n${turnLines(c)}\n</conversation>`;
 
-/** Every `#n` a phrased reply may name: the template's, and for anything but a result, what the contact can see tracked. */
+/** Every `#n` a phrased reply may name: the template's, and for chat, what the contact can see tracked. */
 function allowedNumbers(draft: Draft, c: TurnContext): Set<number> {
   const numbers = (text: string) => [...text.matchAll(/#(\d+)/g)].map(m => Number(m[1]));
   const allowed = new Set(numbers(draft.template));
@@ -79,8 +79,10 @@ function carriesFacts(text: string, draft: Draft, c: TurnContext): boolean {
     const pattern = mention.startsWith("#") ? `${mention}(?!\\d)` : `\\b${mention.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`;
     if (!new RegExp(pattern, "i").test(text)) return false;
   }
-  // A reply may be read on a later day than it was written, so a stated time carries its date and no relative day.
+  // A reply may be read on a later day than it was written, so a stated time carries its date and no relative day. And it
+  // may name no time, date, or weekday that code did not commit, so chat names none.
   if (draft.times.length && RELATIVE_DAY.test(text)) return false;
+  if (!statesOnly(text, draft.times, c.timezone)) return false;
   return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDate(text, at, c.timezone, c.now) && mentionsDay(text, at, c.now, c.timezone));
 }
 
@@ -131,6 +133,7 @@ export class Conversation implements ConversationPort {
     return ["Reply to the person's latest message as Nori. This reply changes nothing: nothing is saved, scheduled, completed, cancelled, or sent.",
       "- Answer from <tracking>, <jobs>, and the conversation. If you don't know, say so briefly.",
       "- Never say you saved, scheduled, changed, sent, or will do anything.",
+      "- Do not state times, dates, or weekdays. If they ask when something is, suggest they ask for their status.",
       `- If they seem to want something done, suggest one plain way to ask. Nori can: ${abilities.join("; ")}.`,
       now(c), `Reminder messages: ${c.paused === "all" ? "paused" : "on"}`, "",
       `<tracking>\n${c.summary.slice(0, 20).map(x => clip(x, 160)).join("\n") || "none"}\n</tracking>`, `<jobs>\n${jobLines(c)}\n</jobs>`,

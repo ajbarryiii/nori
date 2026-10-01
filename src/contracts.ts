@@ -545,15 +545,12 @@ export interface Judge {
 }
 
 /**
- * A committed reply a model may rephrase. Code decides what it must keep. Questions are never drafts: they are sent exactly
- * as code wrote them, because a contact's "yes" must confirm what code will do.
+ * A committed reply a model may rephrase. Code decides what it must keep. Questions and answers are never drafts: they are
+ * sent exactly as code wrote them, so a contact's "yes" confirms what code will do and stated deadlines are the stored ones.
  */
 export interface Draft {
-  /**
-   * `result`: the reply to a committed command, which is also the account of what was done. `answer`: information,
-   * nothing changed. `chat`: no template facts, nothing changed.
-   */
-  kind: "result" | "answer" | "chat";
+  /** `result`: the reply to a committed command, which is also the account of what was done. `chat`: nothing changed. */
+  kind: "result" | "chat";
   template: string;
   /** Instants the reply must state with their day and clock time. */
   times: number[];

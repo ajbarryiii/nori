@@ -287,8 +287,9 @@ test("pause, resume, status, and cancel work conversationally after the agreemen
     "cancel job #2 (“find a plumber”)"]);
   assert.equal(store.setting("pause:owner"), "none");
   assert.deepEqual(store.tasks().map(x => x.state), ["queued", "cancelled"]);
-  assert.deepEqual(conversation.drafts.map(x => [x.kind, x.mentions]), [["result", ["resume"]], ["result", []], ["answer", ["#1", "#2"]],
+  assert.deepEqual(conversation.drafts.map(x => [x.kind, x.mentions]), [["result", ["resume"]], ["result", []],
     ["result", ["#2"]]]);
+  assert.ok(texts(store).some(x => x.startsWith("0 active tasks.\n2 queued jobs.")), "status is sent as code wrote it");
   assert.match(conversation.extracts[0]!.data, /#1 research laptops\n#2 find a plumber/);
   assert.match(texts(store).at(-1)!, /^Cancelled job #2\./);
 });
@@ -736,4 +737,31 @@ test("a question a grammar handler asks is an open prompt, so its answer reaches
   engine.acceptPage("owner", page([message("the mom one", 4, { sentAt: epoch + 120_000 })]));
   await engine.processPending();
   assert.deepEqual([store.task(task.id)?.input, reminders(store).map(x => x.status)], [null, ["active", "completed"]]);
+});
+
+test("a phrased chat reply that asks something is an open prompt for its answer", async t => {
+  const { engine, store, transport, conversation, advance, task } = await jobAskedThenNoriAsked(t);
+  // The reply to Nori's question is understood as chat, and its phrasing asks something new.
+  conversation.understandings.push(understood("chat"));
+  conversation.phrases.push("That sounds like a lot. Want to talk about it?");
+  engine.acceptPage("owner", page([message("ugh, rough day", 2, { sentAt: epoch + 120_000 })]));
+  await engine.processPending(); await engine.tick();
+  assert.equal(transport.sent.at(-1), "That sounds like a lot. Want to talk about it?");
+  advance(60_000);
+  conversation.understandings.push(understood("chat"));
+  engine.acceptPage("owner", page([message("yes", 3, { sentAt: epoch + 180_000 })]));
+  assert.equal(store.task(task.id)?.input, null);
+  await engine.processPending();
+  assert.equal(conversation.understood.at(-1)?.text, "yes");
+});
+
+test("a valid long reminder title gets a shortened description instead of failing", async t => {
+  const { engine, store, conversation } = setup(t);
+  const title = "x".repeat(500);
+  conversation.understandings.push(understood("reminders"));
+  engine.acceptPage("owner", page([message(`please note ${title}`)]));
+  await engine.processPending();
+  assert.equal(reminders(store)[0]?.title, title);
+  assert.equal(store.tasks().length, 0);
+  assert.ok(conversation.proposals[0]!.length < 200);
 });

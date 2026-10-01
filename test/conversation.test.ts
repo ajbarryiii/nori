@@ -105,11 +105,11 @@ test("a phrased result must keep the committed numbers and times", async () => {
   assert.equal(await build(new FakeModel([null])).conversation.phrase(saved, context(), signal), null);
 });
 
-test("answers and chat keep their facts and may name only tracked items", async () => {
+test("results and chat keep their facts and may name only tracked items", async () => {
   const summary = ["2 active tasks.", "#1: stretch", "#2: call mom"];
   const phrase = async (d: Draft, reply: string) =>
     build(new FakeModel([{ reply }])).conversation.phrase(d, context({ summary, jobs: [{ number: 5, text: "research laptops", state: "routed" }] }), signal);
-  const status = draft({ kind: "answer", template: summary.join("\n"), mentions: ["#1", "#2"] });
+  const status = draft({ template: ["2 active tasks:", "#1: stretch", "#2: call mom"].join("\n"), mentions: ["#1", "#2"] });
   assert.equal(await phrase(status, "You have #1 stretch and #2 call mom."), "You have #1 stretch and #2 call mom.");
   assert.equal(await phrase(status, "You have #1 stretch."), null);
   const chat = draft({ kind: "chat", template: "I'm here." });
@@ -134,13 +134,26 @@ test("chat replies change nothing and are screened for claimed actions", async (
   }
 });
 
-test("answers and chat are screened against nothing committed", async () => {
-  for (const [d, reply] of [[draft({ kind: "chat", template: "I'm here." }), "I've set that for tomorrow at 9 AM. Anything else?"],
-    [draft({ kind: "answer", template: "0 queued jobs." }), "Done, I cancelled it. No jobs are queued."]] as const) {
+test("chat is screened against nothing committed", async () => {
+  for (const reply of ["Done, I've set that up for you. Anything else?", "Done, I cancelled it. No jobs are queued."]) {
     const built = build(new FakeModel([{ reply }]), new FakeJudge(0.9, 0.9));
-    assert.equal(await built.conversation.phrase(d, context(), signal), null, reply);
+    assert.equal(await built.conversation.phrase(draft({ kind: "chat", template: "I'm here." }), context(), signal), null, reply);
     assert.deepEqual(built.judge.committed, [null]);
   }
+});
+
+test("phrased replies state no time, date, or weekday beyond the committed ones; chat states none", async () => {
+  const due = at("2026-09-29T16:00:00Z");
+  const saved = draft({ template: "Saved locally #3: call mom. I'll remind you Sep 29, 9:00 AM PDT.", times: [due], mentions: ["#3"] });
+  const phrase = (d: Draft, reply: string) => build(new FakeModel([{ reply }])).conversation.phrase(d, context(), signal);
+  assert.equal(await phrase(saved, "Saved #3 for Tue, Sep 29 at 9 AM."), "Saved #3 for Tue, Sep 29 at 9 AM.");
+  for (const reply of ["Saved #3 for Tue, Sep 29 at 9 AM; your dentist is at 4 PM.", "Saved #3 for Tue, Sep 29 at 9 AM, before Friday.",
+    "Saved #3 for Tue, Sep 29 at 9 AM, two days before Oct 1.", "Saved #3 for Tue, Sep 29 at 9 AM (17:30 works too)."])
+    assert.equal(await phrase(saved, reply), null, reply);
+  const chat = draft({ kind: "chat", template: "I'm here." });
+  assert.equal(await phrase(chat, "Hi! Hope you're doing okay."), "Hi! Hope you're doing okay.");
+  for (const reply of ["Your dentist is at 4 PM.", "Your dentist is on Oct 3.", "Hope Friday goes well!", "See you Tue."])
+    assert.equal(await phrase(chat, reply), null, reply);
 });
 
 test("phrased replies name each time's calendar date and use no relative day, so they read the same on any day", async () => {

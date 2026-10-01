@@ -518,6 +518,8 @@ export class Engine {
     // The reply is read now, so its relative days are measured from now, not from when the message was sent.
     try { text = await conversation.phrase(draft, { ...context, now: this.clock() }, signal); } catch { text = null; }
     this.store.finishDraft(`reply:${item.guid}`, text);
+    // A reply that asks something, as it will be delivered, is an open prompt for the contact's answer.
+    if ((text ?? draft.template).includes("?")) this.addPrompt(contact.id, `reply:${item.guid}`);
   }
 
   /** Everything a model may see about this message, built from the store. */
@@ -608,7 +610,6 @@ export class Engine {
       this.store.finishMessage(item.guid);
       const source = this.source(contact, item); const key = `reply:${item.guid}`;
       this.closePrompts(contact.id, item.sentAt);
-      if (plan.kind === "ask") this.addPrompt(contact.id, key);
       const say = (kind: Draft["kind"], template: string, times: number[] = [], mentions = numbers(template)) => {
         this.enqueue(source, key, template, "drafting");
         draft = { kind, template, times, mentions };
@@ -626,10 +627,15 @@ export class Engine {
           draft = { kind: "result", template: reply, times: [], mentions: numbers(reply) };
           return;
         }
-        case "ask": this.enqueue(source, key, plan.question); return;
+        // Questions and answers go out exactly as written; one that asks something is an open prompt.
+        case "ask": this.enqueue(source, key, plan.question); this.addPrompt(contact.id, key); return;
         case "chat": say("chat", CHAT_TEMPLATE, [], []); return;
-        case "status": say("answer", this.status(contact)); return;
-        case "answer": say("answer", plan.text); return;
+        case "status": case "answer": {
+          const text = plan.kind === "status" ? this.status(contact) : plan.text;
+          this.enqueue(source, key, text);
+          if (text.includes("?")) this.addPrompt(contact.id, key);
+          return;
+        }
         case "engine": say("result", this.command(contact, plan.command, item.sentAt), [], plan.mentions); return;
         case "plugin": {
           const capture: string[] = []; const id = plan.plugin.manifest.id;

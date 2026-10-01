@@ -79,6 +79,26 @@ export function shortWhen(at: number, from: number, timezone: string): string {
   return `${format(at, timezone, { weekday: "short", month: "short", day: "numeric" })}${year} at ${clockText(at, timezone)}`;
 }
 
+const CLOCK_12 = /(?<![\d:])(1[0-2]|0?[1-9])(?::([0-5]\d))?\s?([ap])\.?m\b/gi;
+const CLOCK_24 = /(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?!\d|\s?[ap]\.?m\b)/gi;
+const WEEKDAY_ABBREVIATIONS = /\b(Mon|Tues?|Wed|Thu(?:rs?)?|Fri|Sat|Sun)\b/g;
+
+/**
+ * True when every clock time, calendar date, and weekday `text` names belongs to one of `times`. With no times, `text`
+ * may name none. Used so a phrased reply cannot introduce a time or day that code did not commit.
+ */
+export function statesOnly(text: string, times: readonly number[], timezone: string): boolean {
+  const t = text.replace(/[  ]/g, " ");
+  const targets = times.map(at => zoned(at, timezone));
+  const clocks = [...[...t.matchAll(CLOCK_12)].map(([, h, m, p]) => (Number(h) % 12 + (p!.toLowerCase() === "p" ? 12 : 0)) * 60 + Number(m ?? 0)),
+    ...[...t.matchAll(CLOCK_24)].map(([, h, m]) => Number(h) * 60 + Number(m))];
+  if (clocks.some(minutes => !targets.some(x => x.hour * 60 + x.minute === minutes))) return false;
+  if (explicitDates(t).some(d => !targets.some(x => x.month === d.month && x.day === d.day && (d.year === null || d.year === x.year)))) return false;
+  const weekdays = [...WEEKDAYS.filter(w => new RegExp(`\\b${w}\\b`, "i").test(t)),
+    ...[...t.matchAll(WEEKDAY_ABBREVIATIONS)].map(([, w]) => WEEKDAYS.find(x => x.startsWith(w!.toLowerCase().slice(0, 3)))!)];
+  return weekdays.every(w => targets.some(x => WEEKDAYS[x.dayOfWeek - 1] === w));
+}
+
 /** A compact local send time for conversation lines, e.g. "Mon, Sep 28, 8:59 AM". */
 export function localStamp(at: number, timezone: string): string {
   return `${format(at, timezone, { weekday: "short", month: "short", day: "numeric" })}, ${clockText(at, timezone)}`;

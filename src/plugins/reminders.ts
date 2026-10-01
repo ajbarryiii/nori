@@ -229,15 +229,17 @@ export const reminders: ActionPlugin = {
   },
   describe(command, ctx) {
     const when = (at: number) => describeWhen(at, ctx.time, ctx.timezone);
+    // Titles may be long; the account names them briefly.
+    const name = (title: unknown) => { const text = String(title); return text.length > 80 ? `${text.slice(0, 79)}…` : text; };
     switch (command.kind) {
-      case "remind": return { description: `remind you about “${String(command.title)}” ${when(command.dueAt as number)}`, times: [command.dueAt as number] };
-      case "note": return { description: `save the note “${String(command.title)}”`, times: [] };
+      case "remind": return { description: `remind you about “${name(command.title)}” ${when(command.dueAt as number)}`, times: [command.dueAt as number] };
+      case "note": return { description: `save the note “${name(command.title)}”`, times: [] };
       case "done": case "snooze": {
         const reminder = target(ctx, command.id as number | null);
         if (!reminder) return { description: "ask which reminder you mean", times: [] };
-        if (command.kind === "done") return { description: `mark #${reminder.id} “${reminder.title}” as done`, times: [] };
+        if (command.kind === "done") return { description: `mark #${reminder.id} “${name(reminder.title)}” as done`, times: [] };
         const nextAt = ctx.time + (command.minutes as number) * minute;
-        return { description: `snooze #${reminder.id} “${reminder.title}” until ${when(nextAt)}`, times: [nextAt] };
+        return { description: `snooze #${reminder.id} “${name(reminder.title)}” until ${when(nextAt)}`, times: [nextAt] };
       }
       default: return { description: "show your active reminders", times: [] };
     }
