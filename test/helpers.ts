@@ -14,8 +14,11 @@ export const member: Contact = {
 export const config: Config = {
   assistantUser: "receipts", contacts: [owner],
   timezone: "America/Los_Angeles", dataDir: "/tmp/nori-test", imsgPath: "/usr/local/bin/imsg",
-  pollMs: 1000, quietHours: null, jev: null, runtime: null,
+  pollMs: 1000, quietHours: null, jev: null, responder: null, runtime: null,
 };
+/** Jev settings for tests that enable routing or conversation. */
+export const jevConfig = { model: "jev-test", timeoutMs: 100, dailyLimit: 100, routes: { reminders: 0.8 },
+  thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 } };
 export function message(text: string, rowId = 1, overrides: Partial<Message> = {}): Message {
   return messageFrom(owner, text, rowId, overrides);
 }

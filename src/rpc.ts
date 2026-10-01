@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import type { RpcHandlers, RpcPort } from "./contracts.js";
 import { object as record } from "./config.js";
+import { childEnvironment } from "./secrets.js";
 
 const run = promisify(execFile);
 const signal = (pid: number, name: NodeJS.Signals) => { try { process.kill(pid, name); } catch { /* Already gone. */ } };
@@ -127,11 +128,14 @@ export class StdioRpc implements RpcPort {
   private closed = false;
   private readonly exited: Promise<void>;
   private readonly tag = randomBytes(16).toString("hex");
-  /** `processTable` lists processes when stopping the server's process tree; it is replaceable for tests. */
+  /**
+   * `env` defaults to this process's environment without Nori's API keys. `processTable` lists processes when stopping the
+   * server's process tree; it is replaceable for tests.
+   */
   constructor(private readonly options: { command: string; args: string[]; timeoutMs: number; jsonrpc?: boolean;
     env?: NodeJS.ProcessEnv; handlers?: RpcHandlers; processTable?: (tag: string) => Promise<ProcessTable> }) {
     this.child = spawn(options.command, options.args, { stdio: ["pipe", "pipe", "pipe"], shell: false,
-      env: { ...(options.env ?? process.env), [PROCESS_TAG]: this.tag } });
+      env: { ...(options.env ?? childEnvironment()), [PROCESS_TAG]: this.tag } });
     this.exited = new Promise(resolve => { this.child.once("exit", () => resolve()); this.child.once("error", () => resolve()); });
     this.child.stdout.setEncoding("utf8");
     this.child.stdout.on("data", (chunk: string) => this.receive(chunk));

@@ -1,10 +1,12 @@
-import type { ActionPlugin, Budget, OutboxItem, Clarification, Command, Config, Contact, IntentRouter, Message, MessagePage, MessageTransport,
-  RoutingDecision, Runtime, RuntimeConfig, RuntimeEvents, SendOutcome, Task, TurnOutcome, WaitingFor } from "./contracts.js";
-import { normalizeHandle, record } from "./config.js";
+import type { ActionPlugin, Budget, OutboxItem, Clarification, Command, CommandAccount, Config, Contact, ConversationPort, Draft, IntentRouter,
+  Message, MessagePage, MessageTransport, RouteCatalog, RoutingDecision, Runtime, RuntimeConfig, RuntimeEvents, SendOutcome, Task, TaskState,
+  TurnContext, TurnOutcome, Understanding, WaitingFor } from "./contracts.js";
+import { normalizeHandle, object, record } from "./config.js";
+import { gate } from "./conversation.js";
 import { checkPlugins, isClarification, PluginHost, type DispatchSource } from "./host.js";
 import { inQuietHours, isCompound, localDay, parseEngineCommand, type EngineCommand } from "./parser.js";
 import { builtinPlugins } from "./plugins/index.js";
-import type { ApprovalRecord, Store } from "./store.js";
+import type { ApprovalRecord, PendingMessage, Store } from "./store.js";
 
 function freeze(contact: Contact): Contact {
   return Object.freeze({ ...contact, handles: Object.freeze([...contact.handles]),
@@ -16,6 +18,34 @@ const MAX_APPROVAL_DETAIL = 1500;
 const LIMIT_LABELS: Record<keyof Budget, string> = { minutes: "time", turns: "turn", toolCalls: "tool-call", tokens: "usage" };
 const CONTINUE_AFTER_LIMIT = "Continue where you left off.";
 const CONTINUE_AFTER_INTERRUPTION = "Your previous turn was interrupted before it finished. Check what was already done before repeating any step, then continue.";
+/** A crash or restart may retry understanding once; after that the model-free path answers. */
+const MAX_MODEL_ATTEMPTS = 2;
+const TURN_WINDOW_MS = 6 * 3_600_000;
+const TURN_LIMIT = 8;
+const OPEN: readonly TaskState[] = ["queued", "routed", "running", "waiting_contact", "waiting_access"];
+const CHAT_TEMPLATE = "I'm here. Tell me what you need, or say ‘help’ to see what I can do.";
+const UNSURE = "I'm not sure what you'd like me to do. Could you say it another way?";
+const CANCEL_SCHEMA = { type: "object", additionalProperties: false, required: ["job"],
+  properties: { job: { anyOf: [{ type: "integer" }, { type: "null" }] } } };
+
+type MessageRef = Pick<Message, "guid" | "text" | "sentAt">;
+/** What code decided to do with an understood message. Built outside transactions; committed by `commitPlan`. */
+type Plan =
+  /** Keep the message as a job with the model-free acknowledgement, recording the decision when there is one. */
+  | { kind: "fallback"; decision: Understanding | null }
+  /** Keep the message as a job, with the decision recorded and a phrased acknowledgement. */
+  | { kind: "job"; decision: Understanding }
+  | { kind: "failed"; label: string }
+  | { kind: "ask"; question: string }
+  | { kind: "chat" }
+  | { kind: "status" }
+  | { kind: "answer"; text: string }
+  | { kind: "engine"; command: EngineCommand; mentions: string[] }
+  | { kind: "plugin"; plugin: ActionPlugin; command: Command; account: CommandAccount };
+
+const clip = (text: string, max: number) => text.length > max ? `${text.slice(0, max - 1)}…` : text;
+/** The distinct `#n` numbers in a reply, which a phrased version must keep. */
+const numbers = (text: string) => [...new Set([...text.matchAll(/#\d+/g)].map(m => m[0]))];
 
 /** A runtime turn in progress. Its run clock stops while approvals are pending. */
 interface ActiveTurn {
@@ -41,6 +71,9 @@ export class Engine {
   private readonly contacts: readonly Contact[];
   private readonly clock: () => number;
   private readonly runtime: Runtime | null;
+  private readonly conversation: ConversationPort | null;
+  /** Contacts whose pending messages are being handled, so two drains never interleave one contact's messages. */
+  private readonly draining = new Set<string>();
   private readonly active = new Map<number, ActiveTurn>();
   /** Every started turn until it settles, including after its result was recorded, so shutdown can wait for all of them. */
   private readonly turns = new Set<Promise<void>>();
@@ -48,13 +81,14 @@ export class Engine {
   private sending = false;
 
   constructor(private readonly config: Config, private readonly store: Store, private readonly transport: MessageTransport,
-    options: { plugins?: readonly ActionPlugin[]; clock?: () => number; runtime?: Runtime } = {}) {
+    options: { plugins?: readonly ActionPlugin[]; clock?: () => number; runtime?: Runtime; conversation?: ConversationPort } = {}) {
     const plugins = options.plugins ?? builtinPlugins;
     checkPlugins(config, plugins);
     this.contacts = config.contacts.map(freeze);
     this.clock = options.clock ?? Date.now;
     this.runtime = config.runtime ? options.runtime ?? null : null;
-    this.host = new PluginHost(store, plugins, config.timezone);
+    this.conversation = config.jev && config.responder ? options.conversation ?? null : null;
+    this.host = new PluginHost(store, plugins, config.timezone, this.conversation !== null);
   }
 
   /** Configured contacts with an enrollment. A conversation that no longer matches its enrollment halts processing. */
@@ -93,8 +127,12 @@ export class Engine {
     this.commit(() => {
       for (const message of [...page.messages].sort((a, b) => a.rowId - b.rowId)) {
         if (message.rowId <= cursor || !this.authorized(contact, message) || this.store.hasMessage(message.guid)) continue;
+        // A message behind one still being understood waits its turn, in any mode, so replies keep the conversation's order.
+        if (this.store.hasPendingMessages(contact.id)) { this.store.addMessage(contact.id, message, "pending"); continue; }
         this.store.addMessage(contact.id, message);
-        this.dispatch(contact, message);
+        if (this.dispatch(contact, message)) continue;
+        if (this.conversation) this.store.holdMessage(message.guid);
+        else this.retain(this.source(contact, message), message.text, null);
       }
       this.store.setCursor(contact.id, page.nextCursor);
     });
@@ -106,28 +144,35 @@ export class Engine {
     try { return contact.handles.includes(normalizeHandle(message.sender)); } catch { return false; }
   }
 
-  /** Runs inside the page transaction. A plugin failure rolls back only its own savepoint. */
-  private dispatch(contact: Contact, message: Message): void {
-    const source: DispatchSource = { contact, time: message.sentAt, now: this.clock(), replyKey: n => `reply:${message.guid}:${n}`,
-      timer: null, sourceGuid: message.guid };
+  private source(contact: Contact, message: MessageRef): DispatchSource {
+    return { contact, time: message.sentAt, now: this.clock(), replyKey: n => `reply:${message.guid}:${n}`, timer: null, sourceGuid: message.guid };
+  }
+
+  /**
+   * Runs inside a transaction. A plugin failure rolls back only its own savepoint. Returns false, having changed nothing,
+   * when no command, grammar, or open question claims the message.
+   */
+  private dispatch(contact: Contact, message: MessageRef): boolean {
+    const source = this.source(contact, message);
     const reply = (text: string) => this.enqueue(source, `reply:${message.guid}`, text);
     const command = parseEngineCommand(message.text);
-    if (command) { reply(this.command(contact, command, message.sentAt)); return; }
+    if (command) { reply(this.command(contact, command, message.sentAt)); return true; }
     // Grammars consume the entire message, so a compound request never reaches one.
     if (!isCompound(message.text)) {
-      const context = { contact, time: message.sentAt, timezone: this.config.timezone };
+      const context = { contact, time: message.sentAt, timezone: this.config.timezone, conversational: this.conversation !== null };
       for (const plugin of this.host.permitted(contact)) {
         const id = plugin.manifest.id;
         let result: Command | Clarification | null;
         try { result = this.host.match(plugin, message.text, context); }
-        catch { this.retain(source, message.text, `${id}: grammar error`); return; }
+        catch { this.retain(source, message.text, `${id}: grammar error`); return true; }
         if (result === null) continue;
-        if (isClarification(result)) { reply(result.clarify); return; }
+        // In conversation, understanding can carry a grammar's question across messages, so it asks instead.
+        if (isClarification(result)) { if (this.conversation) return false; reply(result.clarify); return true; }
         const valid = this.host.validate(plugin, result);
-        if (!valid) { this.retain(source, message.text, `${id}: invalid command`); return; }
+        if (!valid) { this.retain(source, message.text, `${id}: invalid command`); return true; }
         try { this.store.savepoint(() => this.host.invoke(plugin, source, ctx => plugin.handle(valid, ctx))); }
         catch { this.retain(source, message.text, `${id}: handler error`); }
-        return;
+        return true;
       }
     }
     // A reply to the runtime's one open question continues that job. With several open, ask once which.
@@ -137,20 +182,23 @@ export class Engine {
         ? this.store.dispatchedAt(`task:${x.id}:turn:${x.usage.turns}:question`) : null;
       return delivered !== null && delivered <= message.sentAt;
     });
-    if (asking.length === 1) { reply(this.followUp(contact, asking[0]!, message.text, message.sentAt)); return; }
-    if (asking.length > 1) { reply(`Which job is that for? Reply ${asking.map(x => `‘#${x.number} …’`).join(" or ")}.`); return; }
-    this.retain(source, message.text, null);
+    if (asking.length === 1) { reply(this.followUp(contact, asking[0]!, message.text, message.sentAt)); return true; }
+    if (asking.length > 1) { reply(`Which job is that for? Reply ${asking.map(x => `‘#${x.number} …’`).join(" or ")}.`); return true; }
+    return false;
   }
 
-  /** Keeps the whole request as a task. Failed dispatches are recorded without message text and skip Jev. */
-  private retain(source: DispatchSource, text: string, failure: string | null): void {
-    const { number } = this.store.addTask({ contactId: source.contact.id, sourceGuid: source.sourceGuid, text, time: source.time,
+  /** Keeps the whole request as a task and acknowledges it. Failed dispatches are recorded without message text and skip Jev. */
+  private retain(source: DispatchSource, text: string, failure: string | null, status: "pending" | "drafting" = "pending"): { task: Task; reply: string } {
+    const task = this.store.addTask({ contactId: source.contact.id, sourceGuid: source.sourceGuid, text, time: source.time,
       hint: null, failure, routable: failure === null });
-    this.enqueue(source, `reply:${source.sourceGuid}`, failure
+    const { number } = task;
+    const reply = failure
       ? `Something went wrong with that request. I kept it as job #${number}; reply ‘status’ to check or ‘cancel #${number}’ to remove it.`
       : this.runtimeFor(source.contact)
         ? `Got it — job #${number}. I'll message you when it's done or if I need you. Reply ‘status’ to check or ‘cancel #${number}’ to stop it.`
-        : `Saved job #${number}. It is queued${this.queuedNote()}. Reply ‘status’ to check or ‘cancel #${number}’ to remove it.`);
+        : `Saved job #${number}. It is queued${this.queuedNote()}. Reply ‘status’ to check or ‘cancel #${number}’ to remove it.`;
+    this.enqueue(source, `reply:${source.sourceGuid}`, reply, status);
+    return { task, reply };
   }
 
   /** Why a contact's queued jobs are not running. Only called for contacts without runtime access. */
@@ -158,8 +206,8 @@ export class Engine {
     return this.runtime ? "; Codex jobs are for the owner only" : "; Codex execution is not connected yet";
   }
 
-  private enqueue(source: Pick<DispatchSource, "contact" | "now">, key: string, text: string): void {
-    this.store.enqueue({ key, contactId: source.contact.id, target: source.contact.conversation, text, kind: "reply", timer: null }, source.now);
+  private enqueue(source: Pick<DispatchSource, "contact" | "now">, key: string, text: string, status: "pending" | "drafting" = "pending"): void {
+    this.store.enqueue({ key, contactId: source.contact.id, target: source.contact.conversation, text, kind: "reply", timer: null }, source.now, status);
   }
   private tell(contact: Contact, key: string, text: string): void { this.enqueue({ contact, now: this.clock() }, key, text); }
 
@@ -219,6 +267,12 @@ export class Engine {
       case "resume": this.store.setSetting(`pause:${contact.id}`, "none"); return "Resumed. Requested reminders follow your quiet hours.";
       case "status": return this.status(contact);
       case "help": {
+        if (this.conversation) {
+          const abilities = [...this.host.catalog(contact, { conversational: true }).options.filter(o => o.route.kind === "action").map(o => o.label!),
+            this.runtimeFor(contact) ? "work on bigger requests as jobs" : "keep bigger requests as queued jobs"];
+          return `Tell me what you need in your own words. I can ${abilities.slice(0, -1).join(", ")}${abilities.length > 1 ? " and " : ""}${abilities.at(-1)}. `
+            + "‘status’ shows what I'm tracking; ‘pause all’ holds reminder messages and ‘resume’ restarts them.";
+        }
         const examples = [...this.host.examples(contact), "status", "pause all", "resume"].map(x => `‘${x}’`);
         return `Try ${examples.slice(0, -1).join(", ")}, or ${examples.at(-1)}. Other requests are saved as queued jobs.`;
       }
@@ -263,7 +317,8 @@ export class Engine {
     void this.runtime?.cancel(taskId).catch(() => { if (turn && this.active.get(taskId) === turn) void this.runtime?.close(); });
   }
 
-  private status(contact: Contact): string {
+  /** Status lines from the contact's permitted plugins. */
+  private summaries(contact: Contact): string[] {
     const now = this.clock();
     const source: DispatchSource = { contact, time: now, now, replyKey: () => "", timer: null, sourceGuid: null };
     const lines: string[] = [];
@@ -275,6 +330,11 @@ export class Engine {
         lines.push(...summary as string[]);
       } catch { lines.push(`${plugin.manifest.id} status is unavailable.`); }
     }
+    return lines;
+  }
+
+  private status(contact: Contact): string {
+    const lines = this.summaries(contact);
     const tasks = this.store.tasks(contact.id);
     const numbers = (keep: (task: Task) => boolean) => tasks.filter(keep).map(x => `#${x.number}`);
     const waiting = (...kinds: Array<WaitingFor["kind"]>) => (x: Task) => x.state === "waiting_contact" && kinds.includes(x.waitingFor?.kind ?? "clarification");
@@ -294,7 +354,13 @@ export class Engine {
     if (this.store.setting(`pause:${contact.id}`) === "all") lines.push("Reminder messages are paused.");
     const uncertain = this.store.outbox(contact.id).filter(x => x.status === "uncertain").length;
     if (uncertain) lines.push(`${uncertain} outgoing message(s) need delivery review; they will not be resent automatically.`);
+    if (this.conversation && this.modelLimitReached()) lines.push("Today's model limit is reached, so I'm using simple replies until tomorrow.");
     return lines.join("\n");
+  }
+
+  private modelLimitReached(): boolean {
+    const { jev, responder } = this.config; const day = localDay(this.clock(), this.config.timezone);
+    return !!jev && !!responder && (this.store.callsToday(day, "jev") >= jev.dailyLimit || this.store.callsToday(day, responder.provider) >= responder.dailyLimit);
   }
 
   private dailyLimitReached(fresh = true): boolean {
@@ -326,8 +392,9 @@ export class Engine {
       // Bounded batch; recheck controls and timer revisions before each external send.
       for (let n = 0; n < 10; n++) {
         const now = this.clock(); const quiet = inQuietHours(now, this.config.timezone, this.config.quietHours);
-        const item = this.store.claimOutgoing(now, item => active.has(item.contactId)
-          && (item.kind === "reply" || (!quiet && this.store.setting(`pause:${item.contactId}`) !== "all" && permitted(item))));
+        // A contact's timer messages wait while one of their messages is pending: it may complete or snooze the reminder.
+        const item = this.store.claimOutgoing(now, item => active.has(item.contactId) && (item.kind === "reply" || (!quiet
+          && this.store.setting(`pause:${item.contactId}`) !== "all" && permitted(item) && !this.store.hasPendingMessages(item.contactId))));
         if (!item) break;
         let result: SendOutcome;
         try { result = await this.transport.send(item.target, item.text); }
@@ -353,6 +420,163 @@ export class Engine {
         catch { this.store.markFailed(timer.id); }
       }
     });
+  }
+
+  /**
+   * Handles each contact's pending messages strictly in order; contacts proceed independently. Model calls happen outside
+   * transactions; the effect and its template reply commit together; a model may then phrase that reply. An abort leaves
+   * the message pending. Without a conversation port, pending messages get model-free handling in the same order.
+   */
+  async processPending(shouldContinue: () => boolean = () => true, signal: AbortSignal = new AbortController().signal): Promise<void> {
+    await Promise.all(this.activeContacts().map(contact => this.drain(contact, shouldContinue, signal)));
+  }
+
+  private async drain(contact: Contact, shouldContinue: () => boolean, signal: AbortSignal): Promise<void> {
+    if (this.draining.has(contact.id)) return;
+    this.draining.add(contact.id);
+    try {
+      for (let n = 0; n < 5 && shouldContinue() && !signal.aborted; n++) {
+        const item = this.store.claimPendingMessage(contact.id);
+        if (!item) break;
+        await this.understand(contact, item, signal);
+      }
+    } finally { this.draining.delete(contact.id); }
+  }
+
+  private async understand(contact: Contact, item: PendingMessage, signal: AbortSignal): Promise<void> {
+    // First as on arrival: a message held only for ordering may be a command, a grammar match, or an answer.
+    let handled = false;
+    this.commit(() => {
+      if (this.store.messageStage(item.guid) !== "pending") { handled = true; return; }
+      handled = this.dispatch(contact, item);
+      if (handled) this.store.finishMessage(item.guid);
+    });
+    const conversation = this.conversation;
+    if (handled) return;
+    if (!conversation || item.attempts > MAX_MODEL_ATTEMPTS) { this.commitPlan(contact, item, { kind: "fallback", decision: null }); return; }
+    const context = this.turnContext(contact, item);
+    let plan: Plan;
+    try {
+      const understanding = await conversation.understand(context, signal);
+      if (signal.aborted) return;
+      plan = understanding ? await this.plan(contact, item, context, understanding, conversation, signal) : { kind: "fallback", decision: null };
+    } catch { plan = { kind: "fallback", decision: null }; }
+    if (signal.aborted) return;
+    const draft = this.commitPlan(contact, item, plan);
+    if (!draft) return;
+    let text: string | null = null;
+    try { text = await conversation.phrase(draft, context, signal); } catch { text = null; }
+    this.store.finishDraft(`reply:${item.guid}`, text);
+  }
+
+  /** Everything a model may see about this message, built from the store. */
+  private turnContext(contact: Contact, item: PendingMessage): TurnContext {
+    const pause = this.store.setting(`pause:${contact.id}`);
+    return { contact, text: item.text, sentAt: item.sentAt, timezone: this.config.timezone,
+      catalog: this.host.catalog(contact, { conversational: true }), summary: this.summaries(contact),
+      jobs: this.store.tasks(contact.id).filter(x => OPEN.includes(x.state)).slice(0, 5).map(x => ({ number: x.number, text: x.text, state: x.state })),
+      turns: this.store.recentTurns(contact.id, this.clock() - TURN_WINDOW_MS, TURN_LIMIT),
+      paused: pause === "all" || pause === "nudges" ? pause : "none" };
+  }
+
+  /** Turns an understanding into a plan. Models only propose; code gates, resolves, and checks before anything is committed. */
+  private async plan(contact: Contact, item: PendingMessage, context: TurnContext, u: Understanding, conversation: ConversationPort,
+    signal: AbortSignal): Promise<Plan> {
+    const decided = gate(u, this.config.jev!.thresholds, this.config.jev!.routes);
+    switch (decided.kind) {
+      case "job": return { kind: "job", decision: u };
+      case "chat": return { kind: "chat" };
+      case "status": return { kind: "status" };
+      case "ask": return { kind: "ask", question: this.which(decided.options, context.catalog) };
+      case "act": break;
+    }
+    const option = decided.option;
+    const confirm = async (description: string, plan: Plan): Promise<Plan> => {
+      const faith = await conversation.faithful(context, description, signal);
+      return faith !== null && faith >= this.config.jev!.thresholds.verify ? plan
+        : { kind: "ask", question: `Did you mean: ${description}? Say yes, or tell me what to change.` };
+    };
+    if (option === "pause") return confirm("pause all reminder messages until you say resume",
+      { kind: "engine", command: { kind: "pause", scope: "all" }, mentions: ["resume"] });
+    if (option === "resume") return confirm("resume reminder messages now", { kind: "engine", command: { kind: "resume" }, mentions: [] });
+    if (option === "cancel") {
+      const open = this.store.tasks(contact.id).filter(x => OPEN.includes(x.state));
+      if (!open.length) return { kind: "answer", text: "You have no open jobs to cancel." };
+      let job: Task | null = open.length === 1 ? open[0]! : null;
+      if (!job) {
+        const answer = object(await conversation.extract(context, { schema: CANCEL_SCHEMA,
+          instructions: "Which one of the person's open jobs, listed in <data> by number, do they want to cancel? Answer its number, or null if unsure.",
+          data: open.slice(0, 20).map(x => `#${x.number} ${clip(x.text, 120)}`).join("\n") }, signal));
+        job = open.find(x => x.number === answer?.job) ?? null;
+        if (!job) return { kind: "ask", question: "Which job do you mean? Reply ‘cancel #n’ with its number, or ‘status’ to see them." };
+      }
+      return confirm(`cancel job #${job.number} (“${clip(job.text, 60)}”)`,
+        { kind: "engine", command: { kind: "cancel", id: job.number }, mentions: [`#${job.number}`] });
+    }
+    const plugin = this.host.permits(contact, option);
+    if (!plugin?.interpret || !plugin.describe) return { kind: "job", decision: u };
+    const source: DispatchSource = { ...this.source(contact, item), extract: request => conversation.extract(context, request, signal) };
+    let result: Command | Clarification | null;
+    try { result = await this.host.interpret(plugin, source, item.text); }
+    catch { return { kind: "failed", label: `${option}: interpret error` }; }
+    if (result === null) return { kind: "fallback", decision: u };
+    if (isClarification(result)) return { kind: "ask", question: result.clarify };
+    const command = this.host.validate(plugin, result);
+    if (!command) return { kind: "failed", label: `${option}: invalid command` };
+    let account: CommandAccount;
+    try { account = this.host.describe(plugin, source, command); }
+    catch { return { kind: "failed", label: `${option}: describe error` }; }
+    return confirm(account.description, { kind: "plugin", plugin, command, account });
+  }
+
+  /** One question offering the two likeliest options, or asking to say it another way. */
+  private which(options: string[], catalog: RouteCatalog): string {
+    const labels = options.map(id => catalog.options.find(o => o.id === id)?.label).filter((x): x is string => !!x);
+    if (labels.length >= 2) return `Do you want me to ${labels[0]}, or ${labels[1]}?`;
+    return labels.length ? `Do you want me to ${labels[0]}?` : UNSURE;
+  }
+
+  /**
+   * Commits a plan with the message's stage. Returns the reply a model may phrase, committed as drafting, or null when
+   * the template reply was committed for sending as is.
+   */
+  private commitPlan(contact: Contact, item: PendingMessage, plan: Plan): Draft | null {
+    let draft: Draft | null = null;
+    this.commit(() => {
+      if (this.store.messageStage(item.guid) !== "pending") return;
+      this.store.finishMessage(item.guid);
+      const source = this.source(contact, item);
+      const say = (kind: Draft["kind"], template: string, times: number[] = [], mentions = numbers(template)) => {
+        this.enqueue(source, `reply:${item.guid}`, template, "drafting");
+        draft = { kind, template, times, mentions };
+      };
+      switch (plan.kind) {
+        case "fallback": {
+          const { task } = this.retain(source, item.text, null);
+          if (plan.decision) this.store.saveDecision(task.id, plan.decision);
+          return;
+        }
+        case "failed": this.retain(source, item.text, plan.label); return;
+        case "job": {
+          const { task, reply } = this.retain(source, item.text, null, "drafting");
+          this.store.saveDecision(task.id, plan.decision);
+          draft = { kind: "result", template: reply, times: [], mentions: numbers(reply) };
+          return;
+        }
+        case "ask": say("question", plan.question); return;
+        case "chat": say("chat", CHAT_TEMPLATE, [], []); return;
+        case "status": say("answer", this.status(contact)); return;
+        case "answer": say("answer", plan.text); return;
+        case "engine": say("result", this.command(contact, plan.command, item.sentAt), [], plan.mentions); return;
+        case "plugin": {
+          const capture: string[] = []; const id = plan.plugin.manifest.id;
+          try { this.store.savepoint(() => this.host.invoke(plan.plugin, { ...source, capture }, ctx => plan.plugin.handle(plan.command, ctx))); }
+          catch { this.retain(source, item.text, `${id}: handler error`); return; }
+          if (capture.length) say("result", capture.join("\n"), plan.account.times);
+        }
+      }
+    });
+    return draft;
   }
 
   /**
@@ -397,9 +621,11 @@ export class Engine {
     const source = (now: number): DispatchSource => ({ contact, time: task.time, now, replyKey: n => `task:${task.id}:${n}`,
       timer: null, sourceGuid: task.sourceGuid });
     if (this.store.task(task.id)?.state !== "queued") return;
-    let result: Command | Clarification;
+    let result: Command | Clarification | null;
     try { result = await this.host.interpret(plugin, source(this.clock()), task.text); }
     catch { this.store.setTaskFailure(task.id, `${id}: interpret error`); return; }
+    // The plugin could not read it: the task stays queued, or goes to the runtime, as if Jev had abstained.
+    if (result === null) return;
     const now = this.clock();
     this.store.transaction(() => {
       const current = this.store.task(task.id);

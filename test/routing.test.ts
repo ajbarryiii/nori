@@ -8,7 +8,7 @@ import { Store } from "../src/store.js";
 import type { Config, IntentRouter, Route, RoutingDecision } from "../src/contracts.js";
 import { config, enroll, epoch, FakeTransport, member, message, messageFrom, owner, page, reminders } from "./helpers.js";
 
-const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 100, routes: { reminders: 0.9 } };
+const jev = { model: "jev-test", timeoutMs: 100, dailyLimit: 100, routes: { reminders: 0.9 }, thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 } };
 const active: Config = { ...config, contacts: [owner, member], jev };
 const decide = (route: Route, confidence = 1, multiAction = false): RoutingDecision =>
   ({ model: "jev-test", catalogVersion: "test", route, confidence, probabilities: {}, multiAction });

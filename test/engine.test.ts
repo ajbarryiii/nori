@@ -250,12 +250,12 @@ test("manifests, allowlists, and Jev routes are checked when the engine starts",
   const store = new Store(":memory:"); t.after(() => store.close());
   const start = (cfg: Config, plugins: ActionPlugin[] = [remindersPlugin]) => new Engine(cfg, store, new FakeTransport(), { plugins });
   assert.throws(() => start({ ...config, contacts: [{ ...owner, plugins: ["missing"] }] }), /missing/);
-  assert.throws(() => start({ ...config, jev: { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { missing: 0.9 } } }), /missing/);
+  assert.throws(() => start({ ...config, jev: { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { missing: 0.9 }, thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 } } }), /missing/);
   assert.throws(() => start(config, [remindersPlugin, fakePlugin("runtime")]), /reserved/);
   assert.throws(() => start(config, [remindersPlugin, fakePlugin("Bad Id")]), /id/);
   assert.throws(() => start(config, [remindersPlugin, remindersPlugin]), /duplicate/i);
   const plain = { ...config, contacts: [{ ...owner, plugins: ["reminders", "plain"] }],
-    jev: { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { plain: 0.9 } } };
+    jev: { model: "jev-test", timeoutMs: 100, dailyLimit: 10, routes: { plain: 0.9 }, thresholds: { act: 0.8, clarify: 0.5, verify: 0.6 } } };
   assert.throws(() => start(plain, [remindersPlugin, fakePlugin("plain")]), /interpret/);
 });
 

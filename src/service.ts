@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { normalizeHandle } from "./config.js";
 import { Engine } from "./engine.js";
-import type { ActionPlugin, Config, Contact, IntentRouter, Message, MessageTransport, Runtime } from "./contracts.js";
+import type { ActionPlugin, Config, Contact, ConversationPort, IntentRouter, Message, MessageTransport, Runtime } from "./contracts.js";
 import { assertIdentity } from "./runtime.js";
 import { Store } from "./store.js";
 
@@ -52,12 +52,16 @@ export async function catchUp(store: Store, engine: Engine, transport: MessageTr
 }
 
 export async function runService(options: { config: Config; store: Store; transport: MessageTransport;
-  checkIdentity: () => void; signal: AbortSignal; router?: IntentRouter; plugins?: readonly ActionPlugin[]; runtime?: Runtime;
-  wait?: (ms: number, signal: AbortSignal) => Promise<void> }): Promise<void> {
-  const { config, store, transport, checkIdentity, signal, router, runtime } = options;
+  checkIdentity: () => void; signal: AbortSignal; router?: IntentRouter | undefined; plugins?: readonly ActionPlugin[]; runtime?: Runtime;
+  conversation?: ConversationPort | undefined; wait?: (ms: number, signal: AbortSignal) => Promise<void> }): Promise<void> {
+  const { config, store, transport, checkIdentity, signal, router, runtime, conversation } = options;
   const wait = options.wait ?? (async (ms, signal) => { await delay(ms, undefined, { signal }); });
   let caughtUp = false; let stopped = false; let failure: unknown;
-  let sending: Promise<void> | null = null; let routing: Promise<void> | null = null;
+  let sending: Promise<void> | null = null; let routing: Promise<void> | null = null; let understanding: Promise<void> | null = null;
+  // Model calls stop on shutdown and on any failure, not only on the external signal.
+  const work = new AbortController();
+  const fail = (error: unknown) => { failure ??= error; work.abort(); };
+  const canWork = () => !stopped && !signal.aborted && !failure;
   // One entry per runTasks call that still has turns running; each poll may start more while free slots remain.
   const working = new Set<Promise<void>>();
   const canDispatch = () => !stopped && !signal.aborted && caughtUp && !failure;
@@ -67,38 +71,43 @@ export async function runService(options: { config: Config; store: Store; transp
     send: async (target, text) => {
       if (!canDispatch()) return { status: "not_started", reason: "Service paused before dispatch" };
       try { checkIdentity(); } catch (error) {
-        failure = error;
+        fail(error);
         return { status: "not_started", reason: "Identity check failed before dispatch" };
       }
       try {
         const result = await transport.send(target, text);
-        if (result.status === "uncertain") failure = new Error("Transport send outcome is uncertain. Review delivery before restarting.");
+        if (result.status === "uncertain") fail(new Error("Transport send outcome is uncertain. Review delivery before restarting."));
         return result;
       } catch {
-        failure = new Error("Transport send failed without a confirmed result. Review delivery before restarting.");
+        fail(new Error("Transport send failed without a confirmed result. Review delivery before restarting."));
         return { status: "uncertain", reason: "Transport ended without a confirmed send result" };
       }
     },
   };
-  const core = new Engine(config, store, guarded, { ...(options.plugins ? { plugins: options.plugins } : {}), ...(runtime ? { runtime } : {}) });
+  const core = new Engine(config, store, guarded, { ...(options.plugins ? { plugins: options.plugins } : {}), ...(runtime ? { runtime } : {}),
+    ...(conversation ? { conversation } : {}) });
   // Shutting the runtime down ends active turns, which leaves their tasks interrupted until the contact continues them.
-  const stop = () => { stopped = true; transport.close(); return runtime?.shutdown(); };
+  const stop = () => { stopped = true; work.abort(); transport.close(); return runtime?.shutdown(); };
+  const startSending = () => { sending ??= core.tick().catch(fail).finally(() => { sending = null; }); };
   signal.addEventListener("abort", stop, { once: true });
   try {
     store.recoverInFlight();
     core.recoverRuntime();
     while (!signal.aborted && !stopped) {
-      if (runtime?.halted) failure ??= new Error(runtime.halted);
+      if (runtime?.halted) fail(new Error(runtime.halted));
       if (failure) throw failure;
       caughtUp = false;
       caughtUp = await catchUp(store, core, transport, checkIdentity);
       core.maintain();
       if (caughtUp && !signal.aborted && !failure) {
-        sending ??= core.tick().catch(error => { failure = error; }).finally(() => { sending = null; });
+        // Pending messages drain in order; model calls see the service's signal so shutdown and failures abort them.
+        understanding ??= core.processPending(canWork, work.signal).catch(fail)
+          .finally(() => { understanding = null; if (canDispatch()) startSending(); });
+        startSending();
         if (router || (runtime && config.runtime))
-          routing ??= core.routeTasks(router ?? null, canDispatch).catch(error => { failure = error; }).finally(() => { routing = null; });
+          routing ??= core.routeTasks(router ?? null, canDispatch).catch(fail).finally(() => { routing = null; });
         if (runtime && config.runtime) {
-          const run: Promise<void> = core.runTasks(canDispatch).catch(error => { failure = error; }).finally(() => { working.delete(run); });
+          const run: Promise<void> = core.runTasks(canDispatch).catch(fail).finally(() => { working.delete(run); });
           working.add(run);
         }
       }
@@ -108,7 +117,9 @@ export async function runService(options: { config: Config; store: Store; transp
   finally {
     // The caller releases the service lock after this returns, so wait until the runtime's processes have exited.
     const closed = stop(); signal.removeEventListener("abort", stop);
-    await Promise.allSettled([sending, routing, ...working, core.idle(), closed]);
+    await Promise.allSettled([sending, routing, understanding, ...working, core.idle(), closed]);
+    // A send started as understanding finished may still be in flight.
+    await Promise.allSettled([sending]);
     store.recoverInFlight();
   }
   // Even after a requested stop: the operator must check for Codex commands still running before Nori runs again.
