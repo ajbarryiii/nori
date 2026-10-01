@@ -102,3 +102,11 @@ test("only committed times, dates, and weekdays may be stated, in any common for
   assert.ok(statesOnly("No times here.", [], tz));
   assert.ok(!statesOnly("See you at noon.", [], tz));
 });
+
+test("day-first dates, ordinal days, and lowercase weekday abbreviations count as stated days", () => {
+  const due = at("2026-10-02T16:00:00Z"); // Friday, October 2, 2026 at 9 AM
+  for (const text of ["the 2nd of October at 9 AM", "2 October, 9 AM", "on fri at 9 am", "on the 2nd at 9 AM"]) assert.ok(statesOnly(text, [due], tz), text);
+  for (const text of ["the 3rd of October", "3 October", "on sat", "on the 3rd"]) assert.ok(!statesOnly(text, [due], tz), text);
+  assert.ok(mentionsDate("the 2nd of October at 9 AM", due, tz));
+  assert.ok(!mentionsDay("2 October at 9 AM", at("2026-10-03T16:00:00Z"), epoch, tz));
+});

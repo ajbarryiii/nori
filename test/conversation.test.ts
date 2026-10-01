@@ -154,7 +154,8 @@ test("phrased replies state no time, date, or weekday beyond the committed ones;
   assert.equal(await phrase(chat, "Hi! Hope you're doing okay."), "Hi! Hope you're doing okay.");
   for (const reply of ["Your dentist is at 4 PM.", "Your dentist is on Oct 3.", "Hope Friday goes well!", "See you Tue.",
     "Your dentist is on 2026-10-15.", "Your dentist is tomorrow.", "Your dentist is at noon.", "It's in 2 hours.", "That's next week.",
-    "Big day today!"])
+    "Big day today!", "Your dentist is in two hours.", "Your dentist is on fri.", "Your dentist is on the 2nd of October.",
+    "It's on the 3rd.", "In half an hour.", "2 October works."])
     assert.equal(await phrase(chat, reply), null, reply);
 });
 

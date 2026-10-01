@@ -81,7 +81,7 @@ export function shortWhen(at: number, from: number, timezone: string): string {
 
 const CLOCK_12 = /(?<![\d:])(1[0-2]|0?[1-9])(?::([0-5]\d))?\s?([ap])\.?m\b/gi;
 const CLOCK_24 = /(?<![\d:])([01]?\d|2[0-3]):([0-5]\d)(?!\d|\s?[ap]\.?m\b)/gi;
-const WEEKDAY_ABBREVIATIONS = /\b(Mon|Tues?|Wed|Thu(?:rs?)?|Fri|Sat|Sun)\b/g;
+const WEEKDAY_ABBREVIATIONS = /\b(mon|tues?|wed|thu(?:rs?)?|fri|sat|sun)\b/gi;
 
 /**
  * True when every clock time, calendar date, and weekday `text` names belongs to one of `times`. With no times, `text`
@@ -95,6 +95,8 @@ export function statesOnly(text: string, times: readonly number[], timezone: str
     ...(/\bnoon\b/i.test(t) ? [12 * 60] : []), ...(/\bmidnight\b/i.test(t) ? [0] : [])];
   if (clocks.some(minutes => !targets.some(x => x.hour * 60 + x.minute === minutes))) return false;
   if (explicitDates(t).some(d => !targets.some(x => x.month === d.month && x.day === d.day && (d.year === null || d.year === x.year)))) return false;
+  // An ordinal day on its own ("the 3rd") names a date too.
+  if ([...t.matchAll(ORDINAL_DAY)].some(([, day]) => !targets.some(x => x.day === Number(day)))) return false;
   const weekdays = [...WEEKDAYS.filter(w => new RegExp(`\\b${w}\\b`, "i").test(t)),
     ...[...t.matchAll(WEEKDAY_ABBREVIATIONS)].map(([, w]) => WEEKDAYS.find(x => x.startsWith(w!.toLowerCase().slice(0, 3)))!)];
   return weekdays.every(w => targets.some(x => WEEKDAYS[x.dayOfWeek - 1] === w));
@@ -118,6 +120,8 @@ const MONTHS = ["january", "february", "march", "april", "may", "june", "july", 
 const MONTH_DAY = /\b(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\.?\s+(\d{1,2})(?!\d)(?:st|nd|rd|th)?(?:,?\s+(\d{4})(?!\d))?/g;
 const NUMERIC_DATE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/])/g;
 const ISO_DATE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
+const DAY_MONTH = /\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\b\.?(?:,?\s+(\d{4})(?!\d))?/g;
+const ORDINAL_DAY = /\b(\d{1,2})(?:st|nd|rd|th)\b/gi;
 
 /** Explicit calendar dates in `text` ("Sep 29", "September 29, 2026", "9/29", "9/29/2026", "2026-09-29"), with the year when given. */
 function explicitDates(text: string): Array<{ month: number; day: number; year: number | null }> {
@@ -125,7 +129,8 @@ function explicitDates(text: string): Array<{ month: number; day: number; year: 
   const year = (value: string | undefined) => value === undefined ? null : value.length === 2 ? 2000 + Number(value) : Number(value);
   return [...[...t.matchAll(MONTH_DAY)].map(([, month, day, y]) => ({ month: MONTHS.findIndex(name => name.startsWith(month!)) + 1, day: Number(day), year: year(y) })),
     ...[...t.matchAll(NUMERIC_DATE)].map(([, month, day, y]) => ({ month: Number(month), day: Number(day), year: year(y) })),
-    ...[...t.matchAll(ISO_DATE)].map(([, y, month, day]) => ({ month: Number(month), day: Number(day), year: Number(y) }))];
+    ...[...t.matchAll(ISO_DATE)].map(([, y, month, day]) => ({ month: Number(month), day: Number(day), year: Number(y) })),
+    ...[...t.matchAll(DAY_MONTH)].map(([, day, month, y]) => ({ month: MONTHS.findIndex(name => name.startsWith(month!)) + 1, day: Number(day), year: year(y) }))];
 }
 
 /**

@@ -834,3 +834,15 @@ test("a phrased reply and its open-prompt marker commit together", async t => {
   await assert.rejects(engine.processPending(), /crash/);
   assert.deepEqual(store.outbox().map(x => [x.status, x.text]), [["drafting", "I'm here. Tell me what you need, or say ‘help’ to see what I can do."]]);
 });
+
+test("a control that skips the queue leaves open prompts for the earlier message it overtook", async t => {
+  const { engine, store, conversation, task } = await jobAskedThenNoriAsked(t);
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ title: "call mom", when: { kind: "at", amount: null, unit: null, day: "tomorrow", hour: 9, minute: 0 } }));
+  // "tomorrow at 9" waits for understanding; a cancel overtakes it before it is drained.
+  engine.acceptPage("owner", page([message("tomorrow at 9", 2, { sentAt: epoch + 120_000 }), message("cancel #2", 3, { sentAt: epoch + 125_000 })]));
+  assert.equal(store.messageStage("guid-2"), "pending");
+  await engine.processPending();
+  assert.equal(store.task(task.id)?.input, null);
+  assert.equal(reminders(store).at(-1)?.title, "call mom");
+});

@@ -131,8 +131,10 @@ export class Engine {
         // A message behind one still being understood waits its turn, in any mode, so replies keep the conversation's order.
         // Controls that stop activity are the exception: a running job must not keep acting while a model call finishes.
         const control = parseEngineCommand(message.text)?.kind;
-        if (this.store.hasPendingMessages(contact.id) && control !== "stop" && control !== "cancel" && control !== "deny") {
-          this.store.addMessage(contact.id, message, "pending"); continue;
+        if (this.store.hasPendingMessages(contact.id)) {
+          if (control !== "stop" && control !== "cancel" && control !== "deny") { this.store.addMessage(contact.id, message, "pending"); continue; }
+          // A control that overtakes earlier messages answers no prompt: those messages may still be answering one.
+          this.store.addMessage(contact.id, message); this.dispatch(contact, message); continue;
         }
         this.store.addMessage(contact.id, message);
         if (this.handle(contact, message)) continue;
