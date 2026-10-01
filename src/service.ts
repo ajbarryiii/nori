@@ -53,7 +53,7 @@ export async function catchUp(store: Store, engine: Engine, transport: MessageTr
 
 /**
  * Runs until the signal aborts or a failure stops it. With `until`, it also stops once `until()` holds and the service is
- * idle: caught up, with nothing being sent, routed, understood, or run, no pending messages, no tasks waiting to be routed,
+ * idle: caught up, with nothing being sent, routed, understood, or run, no pending messages, no tasks routing could claim now,
  * and no unsent replies. The development console uses this to exit cleanly at the end of its input.
  */
 export async function runService(options: { config: Config; store: Store; transport: MessageTransport;
@@ -73,7 +73,7 @@ export async function runService(options: { config: Config; store: Store; transp
   const working = new Set<Promise<void>>();
   const canDispatch = () => !stopped && !signal.aborted && caughtUp && !failure;
   const idle = () => caughtUp && !sending && !routing && !understanding.size && !working.size && !store.hasPendingMessages()
-    && !((router || (runtime && config.runtime)) && store.unroutedTasks().length)
+    && !((router || (runtime && config.runtime)) && core.hasRoutableTasks(!!router))
     && !store.outbox().some(x => x.kind === "reply" && ["drafting", "pending", "sending"].includes(x.status));
   const guarded: MessageTransport = {
     readiness: () => transport.readiness(), readAfter: (conversation, cursor) => transport.readAfter(conversation, cursor),

@@ -659,3 +659,41 @@ test("understanding can send a reply to the one job waiting on a question, after
   assert.equal(store.task(task.id)?.state, "routed");
   assert.equal(store.tasks().length, 1);
 });
+
+test("a reminder held by pause all stays an open prompt until it is delivered and answered", async t => {
+  const { engine, store, transport, conversation, advance } = setup(t);
+  const task = store.addTask({ contactId: "owner", sourceGuid: null, text: "plan a trip", time: epoch, hint: null, failure: null, routable: false });
+  store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "question" } });
+  store.enqueue({ key: `task:${task.id}:turn:0:question`, contactId: "owner", target: owner.conversation, text: "Job #1 asks: Which city?",
+    kind: "reply", timer: null }, epoch);
+  engine.acceptPage("owner", page([message("remind me to stretch in 1 minute"), message("pause all", 2)]));
+  await engine.tick();
+  advance(60_000); await engine.tick();
+  assert.ok(!transport.sent.some(x => x.startsWith("Reminder")));
+  advance(60_000);
+  engine.acceptPage("owner", page([message("resume", 3, { sentAt: epoch + 120_000 })]));
+  await engine.tick();
+  assert.ok(transport.sent.some(x => x.startsWith("Reminder: stretch")));
+  advance(60_000);
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ action: "done", task_id: 1 }));
+  engine.acceptPage("owner", page([message("did it", 4, { sentAt: epoch + 180_000 })]));
+  await engine.processPending();
+  assert.deepEqual([store.task(task.id)?.input, reminders(store)[0]?.status], [null, "completed"]);
+});
+
+test("with until, tasks held by the daily Jev limit do not keep the service running", async t => {
+  const store = new Store(":memory:"); t.after(() => store.close()); enroll(store);
+  const transport = new FakeTransport();
+  transport.readAfter = async (_conversation, cursor) => cursor === 0 ? page([message("please research laptops", 1, { sentAt: Date.now() })])
+    : page([], cursor);
+  const jev = { ...jevConfig, dailyLimit: 1 };
+  assert.equal(store.reserveCall(localDay(Date.now(), config.timezone), "jev", 1), true);
+  let classified = 0; const safety = AbortSignal.timeout(5_000);
+  await runService({ config: { ...config, jev }, store, transport, checkIdentity: () => {}, signal: safety,
+    router: { classify: async () => { classified++; return null; } }, until: () => true, wait: async () => { await tick(); } });
+  assert.equal(safety.aborted, false, "the service stopped on its own once idle");
+  assert.equal(classified, 0);
+  assert.deepEqual(store.unroutedTasks().map(x => x.text), ["please research laptops"]);
+  assert.match(transport.sent[0]!, /^Saved job #1/);
+});

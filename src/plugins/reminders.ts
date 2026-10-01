@@ -221,7 +221,8 @@ export const reminders: ActionPlugin = {
       core = core.replace(/^(?:please|pls|can you|could you|would you|will you)[\s,]+/i, "").replace(/[\s,]+(?:please|thanks|thank you)$/i, "").trim();
     }
     const direct = match(core, ctx);
-    if (direct && !("clarify" in direct)) return bind(direct, ctx);
+    // In conversation the command is verified before it commits, so its reminder is named now; otherwise handle asks.
+    if (direct && !("clarify" in direct)) return ctx.extract ? bind(direct, ctx) : direct;
     if (!ctx.extract) return direct ?? UNSURE;
     const proposal = decodeProposal(await ctx.extract({ instructions: INSTRUCTIONS, schema: EXTRACT_SCHEMA, data: lines(ctx) }));
     return proposal && resolveProposal(proposal, ctx);

@@ -152,7 +152,7 @@ export class Engine {
   /** Dispatches a message; one that is handled answers, and so closes, any open conversational question. */
   private handle(contact: Contact, message: MessageRef): boolean {
     if (!this.dispatch(contact, message)) return false;
-    this.closePrompts(contact.id);
+    this.closePrompts(contact.id, message.sentAt);
     return true;
   }
 
@@ -221,8 +221,11 @@ export class Engine {
   private addPrompt(contactId: string, key: string): void {
     if (this.conversation) this.store.setSetting(`prompts:${contactId}`, JSON.stringify([...this.prompts(contactId), key].slice(-5)));
   }
-  private closePrompts(contactId: string): void {
-    if (this.conversation) this.store.setSetting(`prompts:${contactId}`, "[]");
+  /** A message answers the prompts delivered before it was sent; ones not yet delivered, such as a held reminder, stay open. */
+  private closePrompts(contactId: string, sentAt: number): void {
+    if (!this.conversation) return;
+    const open = this.prompts(contactId).filter(key => { const at = this.store.dispatchedAt(key); return at === null || at > sentAt; });
+    this.store.setSetting(`prompts:${contactId}`, JSON.stringify(open));
   }
 
   /** Keeps the whole request as a task and acknowledges it. Failed dispatches are recorded without message text and skip Jev. */
@@ -596,7 +599,7 @@ export class Engine {
       if (this.store.messageStage(item.guid) !== "pending") return;
       this.store.finishMessage(item.guid);
       const source = this.source(contact, item); const key = `reply:${item.guid}`;
-      this.closePrompts(contact.id);
+      this.closePrompts(contact.id, item.sentAt);
       if (plan.kind === "ask") this.addPrompt(contact.id, key);
       const say = (kind: Draft["kind"], template: string, times: number[] = [], mentions = numbers(template)) => {
         this.enqueue(source, key, template, "drafting");
@@ -722,6 +725,19 @@ export class Engine {
       if (next !== "held") turns.push(next);
     }
     await Promise.all(turns);
+  }
+
+  /**
+   * Whether `routeTasks` could claim a task now: one from a contact without pending messages that either may use the
+   * runtime or can still be classified within today's Jev limit. Tasks held by the limit are not outstanding work.
+   */
+  hasRoutableTasks(withRouter: boolean): boolean {
+    const classify = withRouter && this.store.callsToday(localDay(this.clock(), this.config.timezone), "jev") < (this.config.jev?.dailyLimit ?? Infinity);
+    const contacts = this.activeContacts().filter(c => !this.store.hasPendingMessages(c.id));
+    return this.store.unroutedTasks().some(task => {
+      const contact = contacts.find(c => c.id === task.contactId);
+      return !!contact && (classify || !!this.runtimeFor(contact));
+    });
   }
 
   /** Resolves once every turn started so far has ended, whether or not its result could be recorded. */

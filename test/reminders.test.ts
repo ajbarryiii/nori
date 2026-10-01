@@ -302,3 +302,9 @@ test("the status summary gives each reminder's next time and, when snoozed, its 
   assert.deepEqual(plugin.summary!(ctx), ["3 active tasks.", "#1: go to dentist (next reminder Sep 29, 10:00 AM PDT)",
     "#2: stretch (next reminder Sep 28, 9:20 AM PDT; due Sep 28, 9:00 AM PDT)", "#3: buy milk"]);
 });
+
+test("without the responder, an implicit reminder reference is left for handle to ask about with complete commands", async () => {
+  const { ctx } = talking([item(1, "stretch", epoch), item(2, "call mom")], null);
+  const plain = { ...ctx, extract: null } as PluginContext;
+  assert.deepEqual(await plugin.interpret!("please snooze 20m", plain), { kind: "snooze", id: null, minutes: 20 });
+});
