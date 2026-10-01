@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { afterEach, test } from "node:test";
 import { CodexModel, codexAppServerArgs, codexResponderFeatures } from "../src/codex.js";
 import { REPLY_SCHEMA } from "../src/conversation.js";
 import { JevJudge, JevUnderstander } from "../src/jev.js";
@@ -118,14 +118,22 @@ test("Jev checks return a probability or abstain", async () => {
   assert.equal(await new JevJudge({ key: "k", model: "jev-test", timeoutMs: 500, fetch: broken.fetch }).claimsAction("hi", null, signal), null);
 });
 
-/** A Codex app-server over Nori's RPC handlers. `script` plays the turn's notifications. */
+const codexConnections = new Set<FakeCodex>();
+afterEach(() => { for (const rpc of codexConnections) rpc.close(); });
+
+/** A Codex app-server over Nori's RPC handlers. `script` plays the turn's notifications.
+ * Like a live child process, an open connection keeps the event loop alive until it is closed.
+ */
 class FakeCodex implements RpcPort {
+  private readonly keepAlive = setInterval(() => {}, 1000);
   calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   closed = false; threads = 0;
   /** The effective configuration `config/read` reports: by default, exactly what the responder's flags ask for. */
   config: Record<string, unknown> = { features: Object.fromEntries(codexResponderFeatures.map(name => [name, false])),
     web_search: "disabled", mcp_servers: {} };
-  constructor(public handlers: RpcHandlers, public script: (rpc: FakeCodex, threadId: string, turnId: string) => void) {}
+  constructor(public handlers: RpcHandlers, public script: (rpc: FakeCodex, threadId: string, turnId: string) => void) {
+    codexConnections.add(this);
+  }
   emit(method: string, params: Record<string, unknown>) { this.handlers.notification?.(method, params); }
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
     this.calls.push({ method, params });
@@ -141,7 +149,10 @@ class FakeCodex implements RpcPort {
     return {};
   }
   notify(method: string, params: Record<string, unknown>) { this.calls.push({ method, params }); }
-  close() { if (this.closed) return; this.closed = true; this.handlers.closed?.(true); }
+  close() {
+    if (this.closed) return;
+    this.closed = true; clearInterval(this.keepAlive); codexConnections.delete(this); this.handlers.closed?.(true);
+  }
 }
 const finish = (status: string, text: string | null) => (rpc: FakeCodex, threadId: string, turnId: string) => {
   if (text !== null) rpc.emit("item/completed", { threadId, turnId, item: { type: "agentMessage", id: "a1", text } });
