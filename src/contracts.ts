@@ -508,7 +508,10 @@ export interface Turn { from: "contact" | "nori"; text: string; at: number }
 export interface TurnContext {
   contact: Contact;
   text: string;
+  /** When the message was sent. Relative words in the message ("tomorrow") are read from it. */
   sentAt: number;
+  /** When Nori is writing. Relative days in Nori's replies are measured from it, since the message may be handled late. */
+  now: number;
   timezone: string;
   /** The conversational catalog for this contact. */
   catalog: RouteCatalog;

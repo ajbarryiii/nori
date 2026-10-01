@@ -129,9 +129,13 @@ export class Engine {
       for (const message of [...page.messages].sort((a, b) => a.rowId - b.rowId)) {
         if (message.rowId <= cursor || !this.authorized(contact, message) || this.store.hasMessage(message.guid)) continue;
         // A message behind one still being understood waits its turn, in any mode, so replies keep the conversation's order.
-        if (this.store.hasPendingMessages(contact.id)) { this.store.addMessage(contact.id, message, "pending"); continue; }
+        // Controls that stop activity are the exception: a running job must not keep acting while a model call finishes.
+        const control = parseEngineCommand(message.text)?.kind;
+        if (this.store.hasPendingMessages(contact.id) && control !== "stop" && control !== "cancel" && control !== "deny") {
+          this.store.addMessage(contact.id, message, "pending"); continue;
+        }
         this.store.addMessage(contact.id, message);
-        if (this.dispatch(contact, message)) continue;
+        if (this.handle(contact, message)) continue;
         if (this.conversation) this.store.holdMessage(message.guid);
         else this.retain(this.source(contact, message), message.text, null);
       }
@@ -143,6 +147,13 @@ export class Engine {
     if (message.isGroup || message.isFromMe || message.chatId !== contact.conversation.chatId
       || message.chatGuid !== contact.conversation.chatGuid || !message.guid || !message.text.trim() || !Number.isFinite(message.sentAt)) return false;
     try { return contact.handles.includes(normalizeHandle(message.sender)); } catch { return false; }
+  }
+
+  /** Dispatches a message; one that is handled answers, and so closes, any open conversational question. */
+  private handle(contact: Contact, message: MessageRef): boolean {
+    if (!this.dispatch(contact, message)) return false;
+    if (this.conversation) this.store.setSetting(`question:${contact.id}`, "");
+    return true;
   }
 
   private source(contact: Contact, message: MessageRef): DispatchSource {
@@ -452,7 +463,7 @@ export class Engine {
     let handled = false;
     this.commit(() => {
       if (this.store.messageStage(item.guid) !== "pending") { handled = true; return; }
-      handled = this.dispatch(contact, item);
+      handled = this.handle(contact, item);
       if (handled) this.store.finishMessage(item.guid);
     });
     const conversation = this.conversation;
@@ -469,14 +480,15 @@ export class Engine {
     const draft = this.commitPlan(contact, item, plan);
     if (!draft) return;
     let text: string | null = null;
-    try { text = await conversation.phrase(draft, context, signal); } catch { text = null; }
+    // The reply is read now, so its relative days are measured from now, not from when the message was sent.
+    try { text = await conversation.phrase(draft, { ...context, now: this.clock() }, signal); } catch { text = null; }
     this.store.finishDraft(`reply:${item.guid}`, text);
   }
 
   /** Everything a model may see about this message, built from the store. */
   private turnContext(contact: Contact, item: PendingMessage): TurnContext {
     const pause = this.store.setting(`pause:${contact.id}`);
-    return { contact, text: item.text, sentAt: item.sentAt, timezone: this.config.timezone,
+    return { contact, text: item.text, sentAt: item.sentAt, now: this.clock(), timezone: this.config.timezone,
       catalog: this.host.catalog(contact, { conversational: true }), summary: this.summaries(contact),
       jobs: this.store.tasks(contact.id).filter(x => OPEN.includes(x.state)).slice(0, 5).map(x => ({ number: x.number, text: x.text, state: x.state })),
       turns: this.store.recentTurns(contact.id, this.clock() - TURN_WINDOW_MS, TURN_LIMIT),

@@ -31,7 +31,7 @@ test("clock times resolve named days in the configured zone and must be in the f
 });
 
 test("descriptions name the day relative to the message and the local clock", () => {
-  assert.equal(describeWhen(at("2026-09-28T22:30:00Z"), epoch, tz), "today at 3:30 PM");
+  assert.equal(describeWhen(at("2026-09-28T22:30:00Z"), epoch, tz), "today (Mon, Sep 28) at 3:30 PM");
   assert.equal(describeWhen(at("2026-09-29T17:00:00Z"), epoch, tz), "tomorrow (Tue, Sep 29) at 10:00 AM");
   assert.equal(describeWhen(at("2026-10-02T16:00:00Z"), epoch, tz), "Friday (Oct 2) at 9:00 AM");
   assert.equal(describeWhen(at("2026-11-10T17:00:00Z"), epoch, tz), "Tue, Nov 10 at 9:00 AM");

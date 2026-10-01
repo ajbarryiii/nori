@@ -18,7 +18,7 @@ const catalog: RouteCatalog = { version: "catalog-test", options: [
   { id: "chat", criteria: "Small talk.", route: { kind: "chat" } },
   { id: "clarify", criteria: "Unclear.", route: { kind: "clarify" } },
 ] };
-const context: TurnContext = { contact: owner, text: "remind me to call mom at 5", sentAt: epoch, timezone: "America/Los_Angeles", catalog,
+const context: TurnContext = { contact: owner, text: "remind me to call mom at 5", sentAt: epoch, now: epoch, timezone: "America/Los_Angeles", catalog,
   summary: ["1 active tasks.", "#2: stretch"], jobs: [{ number: 3, text: "research laptops", state: "routed" }],
   turns: [{ from: "nori", text: "Anything else?", at: epoch - 1000 }], paused: "none" };
 

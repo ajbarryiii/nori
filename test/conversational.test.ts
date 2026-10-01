@@ -15,7 +15,7 @@ import { config, enroll, epoch, FakeTransport, jevConfig, member, message, messa
 type Answer<T> = T | ((context: TurnContext, signal: AbortSignal) => Promise<T>);
 class FakeConversation implements ConversationPort {
   understandings: Array<Answer<Understanding | null>> = []; faith: Array<Answer<number | null>> = [];
-  extractions: unknown[] = []; phrases: Array<Answer<string | null>> = [];
+  extractions: unknown[] = []; phrases: Array<Answer<string | null>> = []; phrased: TurnContext[] = [];
   understood: TurnContext[] = []; proposals: string[] = []; extracts: ExtractRequest[] = []; drafts: Draft[] = []; signals: AbortSignal[] = [];
   async understand(context: TurnContext, signal: AbortSignal) {
     this.understood.push(context); this.signals.push(signal);
@@ -29,7 +29,7 @@ class FakeConversation implements ConversationPort {
   }
   async extract(_context: TurnContext, request: ExtractRequest) { this.extracts.push(request); return this.extractions.shift() ?? null; }
   async phrase(draft: Draft, context: TurnContext, signal: AbortSignal) {
-    this.drafts.push(draft);
+    this.drafts.push(draft); this.phrased.push(context);
     const next = this.phrases.shift();
     return typeof next === "function" ? next(context, signal) : next ?? null;
   }
@@ -75,7 +75,7 @@ test("natural language waits for understanding, then commits the plugin's change
   await engine.processPending();
   assert.equal(reminders(store)[0]?.title, "call mom");
   assert.equal(conversation.understood[0]?.text, "can you remind me to call mom in an hour?");
-  assert.deepEqual(conversation.proposals, ["remind you about “call mom” today at 10:00 AM"]);
+  assert.deepEqual(conversation.proposals, ["remind you about “call mom” today (Mon, Sep 28) at 10:00 AM"]);
   const draft = conversation.drafts[0]!;
   assert.equal(draft.kind, "result"); assert.match(draft.template, /^Saved locally #1: call mom\. I'll remind you/);
   assert.deepEqual([draft.times, draft.mentions], [[epoch + 3_600_000], ["#1"]]);
@@ -272,7 +272,7 @@ test("every change needs the agreement check; a failed or unavailable check asks
   engine.acceptPage("owner", page([message("call mom in an hour")]));
   await engine.processPending();
   assert.equal(reminders(store).length, 0);
-  assert.deepEqual(texts(store), ["Did you mean: remind you about “call mom” today at 10:00 AM? Say yes, or tell me what to change."]);
+  assert.deepEqual(texts(store), ["Did you mean: remind you about “call mom” today (Mon, Sep 28) at 10:00 AM? Say yes, or tell me what to change."]);
 });
 
 test("pause, resume, status, and cancel work conversationally after the agreement check", async t => {
@@ -450,20 +450,28 @@ test("a change whose account shifts before commit is not made, and the contact i
   assert.equal(texts(store).at(-1), "Something changed while I was checking that, so I haven't done it. Could you say it again?");
 });
 
-test("an open conversational question asked after a job's question gets the answer; later replies reach the job again", async t => {
-  const { engine, store, conversation, advance } = setup(t);
+/** A job asks "Which city?", then Nori asks when to remind about mom, and both questions are delivered. */
+async function jobAskedThenNoriAsked(t: { after(fn: () => void): void }) {
+  const built = setup(t); const { engine, store, conversation, advance } = built;
   const task = store.addTask({ contactId: "owner", sourceGuid: null, text: "plan a trip", time: epoch, hint: null, failure: null, routable: false });
   store.updateTask(task.id, { state: "waiting_contact", waitingFor: { kind: "question" } });
   store.enqueue({ key: `task:${task.id}:turn:0:question`, contactId: "owner", target: owner.conversation, text: "Job #1 asks: Which city?",
     kind: "reply", timer: null }, epoch);
   await engine.tick();
   advance(60_000);
-  conversation.understandings.push(understood("reminders"), understood("reminders"));
-  conversation.extractions.push(extraction({ title: "call mom", missing: ["time"] }),
-    extraction({ title: "call mom", when: { kind: "at", amount: null, unit: null, day: "tomorrow", hour: 9, minute: 0 } }));
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ title: "call mom", missing: ["time"] }));
   engine.acceptPage("owner", page([message("remind me to call mom", 1, { sentAt: epoch + 60_000 })]));
   await engine.processPending(); await engine.tick();
+  assert.equal(texts(store).at(-1), "When should I remind you?");
   advance(60_000);
+  return { ...built, task };
+}
+
+test("an open conversational question asked after a job's question gets the answer; later replies reach the job again", async t => {
+  const { engine, store, conversation, task } = await jobAskedThenNoriAsked(t);
+  conversation.understandings.push(understood("reminders"));
+  conversation.extractions.push(extraction({ title: "call mom", when: { kind: "at", amount: null, unit: null, day: "tomorrow", hour: 9, minute: 0 } }));
   engine.acceptPage("owner", page([message("tomorrow at 9", 2, { sentAt: epoch + 120_000 })]));
   await engine.processPending();
   assert.equal(store.task(task.id)?.input, null);
@@ -489,4 +497,40 @@ test("the service keeps draining other contacts while one contact waits on a mod
     wait: async () => { await tick(); await tick(); if (++polls === 8) controller.abort(); } });
   assert.deepEqual(transport.sent, ["Hi Sam!"]);
   assert.equal(store.hasPendingMessages("owner"), true);
+});
+
+test("a handled answer closes the open conversational question, so the job's question gets the next reply", async t => {
+  const { engine, store, task } = await jobAskedThenNoriAsked(t);
+  engine.acceptPage("owner", page([message("remind me to call mom in 60 minutes", 2, { sentAt: epoch + 120_000 })]));
+  assert.equal(reminders(store)[0]?.title, "call mom");
+  engine.acceptPage("owner", page([message("Lisbon", 3, { sentAt: epoch + 180_000 })]));
+  assert.match(store.task(task.id)?.input ?? "", /Lisbon/);
+});
+
+test("controls that stop activity apply at once behind a pending message; other commands wait their turn", async t => {
+  const { engine, store, conversation } = setup(t);
+  conversation.understandings.push(null);
+  engine.acceptPage("owner", page([message("research laptops")]));
+  await engine.processPending();
+  let release!: (value: Understanding | null) => void;
+  conversation.understandings.push(() => new Promise(resolve => { release = resolve; }));
+  engine.acceptPage("owner", page([message("thanks!", 2)]));
+  const processing = engine.processPending();
+  while (!release) await tick();
+  engine.acceptPage("owner", page([message("cancel #1", 3), message("status", 4), message("deny A9", 5)]));
+  assert.equal(store.tasks()[0]?.state, "cancelled");
+  assert.deepEqual(texts(store).slice(1), ["Cancelled job #1.", "Approval A9 is not pending."]);
+  assert.equal(store.messageStage("guid-4"), "pending");
+  release(understood("chat")); await processing;
+  while (store.hasPendingMessages()) await engine.processPending();
+  assert.match(texts(store).at(-1)!, /0 queued jobs/);
+});
+
+test("replies are written with the current time, while the message keeps its own", async t => {
+  const { engine, conversation, advance } = setup(t);
+  conversation.understandings.push(understood("chat"));
+  engine.acceptPage("owner", page([message("hey")]));
+  advance(15 * 3_600_000);
+  await engine.processPending();
+  assert.deepEqual([conversation.phrased[0]?.sentAt, conversation.phrased[0]?.now], [epoch, epoch + 15 * 3_600_000]);
 });

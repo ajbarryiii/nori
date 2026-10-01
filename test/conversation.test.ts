@@ -14,7 +14,7 @@ const catalog: RouteCatalog = { version: "catalog-test", options: [
   ...(["runtime", "continue", "clarify", "chat", "status", "pause", "resume", "cancel"] as const)
     .map(kind => ({ id: kind, criteria: `${kind}.`, route: { kind } as Route })),
 ] };
-const context = (overrides: Partial<TurnContext> = {}): TurnContext => ({ contact: owner, text: "hi", sentAt: epoch, timezone: tz, catalog,
+const context = (overrides: Partial<TurnContext> = {}): TurnContext => ({ contact: owner, text: "hi", sentAt: epoch, now: epoch, timezone: tz, catalog,
   summary: [], jobs: [], turns: [], paused: "none", ...overrides });
 
 function understanding(option: string, confidence = 0.95, extra: Partial<Understanding> = {}): Understanding {
@@ -141,4 +141,16 @@ test("answers and chat are screened against nothing committed", async () => {
     assert.equal(await built.conversation.phrase(d, context(), signal), null, reply);
     assert.deepEqual(built.judge.committed, [null]);
   }
+});
+
+test("phrased days are measured from when the reply is written, not when the message was sent", async () => {
+  // Sent Monday at 11:59 PM, written Tuesday at 12:01 AM, for a reminder on Tuesday at 9 AM.
+  const sentAt = at("2026-09-29T06:59:00Z"); const now = at("2026-09-29T07:01:00Z"); const due = at("2026-09-29T16:00:00Z");
+  const saved = draft({ template: "Saved locally #3: call mom. I'll remind you Sep 29, 9:00 AM PDT.", times: [due], mentions: ["#3"] });
+  const c = context({ sentAt, now });
+  assert.equal(await build(new FakeModel([{ reply: "Saved #3: I'll remind you tomorrow at 9 AM." }])).conversation.phrase(saved, c, signal), null);
+  const right = build(new FakeModel([{ reply: "Saved #3: I'll remind you today at 9 AM." }]));
+  assert.equal(await right.conversation.phrase(saved, c, signal), "Saved #3: I'll remind you today at 9 AM.");
+  assert.match(right.model.requests[0]!.prompt, /"today \(Tue, Sep 29\) at 9:00 AM"/);
+  assert.match(right.model.requests[0]!.prompt, /Tuesday, September 29, 2026/);
 });

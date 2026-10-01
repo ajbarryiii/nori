@@ -52,7 +52,10 @@ const clip = (text: string, max: number) => text.length > max ? `${text.slice(0,
 const turnLines = (c: TurnContext) => c.turns.length
   ? c.turns.map(t => `${t.from === "contact" ? "Them" : "Nori"}: ${clip(t.text, 400)}`).join("\n") : "none";
 const jobLines = (c: TurnContext) => c.jobs.length ? c.jobs.slice(0, 5).map(j => `#${j.number} ${clip(j.text, 120)} (${j.state})`).join("\n") : "none";
-const now = (c: TurnContext) => `Local time now: ${localNow(c.sentAt, c.timezone)} (${c.timezone})`;
+/** Relative words in the message are read from when it was sent. */
+const sent = (c: TurnContext) => `The message was sent ${localNow(c.sentAt, c.timezone)} (${c.timezone}).`;
+/** Replies are read now, so their relative days are measured from when they are written. */
+const now = (c: TurnContext) => `Local time now: ${localNow(c.now, c.timezone)} (${c.timezone})`;
 const message = (c: TurnContext) => `<message>\n${c.text}\n</message>`;
 const conversation = (c: TurnContext) => `<conversation>\n${turnLines(c)}\n</conversation>`;
 
@@ -73,7 +76,7 @@ function carriesFacts(text: string, draft: Draft, c: TurnContext): boolean {
     const pattern = mention.startsWith("#") ? `${mention}(?!\\d)` : `\\b${mention.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`;
     if (!new RegExp(pattern, "i").test(text)) return false;
   }
-  return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDay(text, at, c.sentAt, c.timezone));
+  return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDay(text, at, c.now, c.timezone));
 }
 
 /**
@@ -87,7 +90,7 @@ export class Conversation implements ConversationPort {
   faithful(context: TurnContext, proposed: string, signal: AbortSignal) { return this.ports.judge.faithful(context, proposed, signal); }
 
   async extract(context: TurnContext, request: ExtractRequest, signal: AbortSignal): Promise<unknown> {
-    const prompt = [request.instructions, now(context), "", `<data>\n${request.data}\n</data>`, conversation(context), message(context)].join("\n");
+    const prompt = [request.instructions, sent(context), "", `<data>\n${request.data}\n</data>`, conversation(context), message(context)].join("\n");
     const result = await this.ports.model.generate({ purpose: "extract", system: SYSTEM, prompt, schema: request.schema, maxOutputTokens: 400 }, signal);
     return result?.json ?? null;
   }
@@ -107,7 +110,7 @@ export class Conversation implements ConversationPort {
   private replyPrompt(draft: Draft, c: TurnContext): string {
     const did = draft.kind === "result" ? "Nori has already done exactly what the reply says, and nothing else." : "Nori changed nothing; the reply answers the person.";
     const facts = { what_happened: did, reply_written_by_code: draft.template,
-      ...(draft.times.length ? { times: draft.times.map(at => describeWhen(at, c.sentAt, c.timezone)) } : {}),
+      ...(draft.times.length ? { times: draft.times.map(at => describeWhen(at, c.now, c.timezone)) } : {}),
       must_mention: [...draft.mentions, ...draft.times.map(at => clockText(at, c.timezone))] };
     return ["Rewrite Nori's reply to the person's latest message in Nori's voice.",
       "- Keep every fact in <facts>. Do not add promises, actions, or details that are not there.",

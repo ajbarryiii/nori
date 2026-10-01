@@ -39,7 +39,7 @@ export async function evaluate(cases: EvalCase[], understander: Understander,
   const signal = options.signal ?? new AbortController().signal;
   const rows: EvalRow[] = [];
   for (const c of cases) {
-    const context: TurnContext = { contact: CONSOLE_CONTACT, text: c.text, sentAt: options.now, timezone: options.timezone, catalog: CATALOG,
+    const context: TurnContext = { contact: CONSOLE_CONTACT, text: c.text, sentAt: options.now, now: options.now, timezone: options.timezone, catalog: CATALOG,
       summary: c.tracking, jobs: [], turns: c.turns.map((t, i) => ({ ...t, at: options.now - (c.turns.length - i) * 60_000 })), paused: "none" };
     const u = await understander.understand(context, signal);
     const got = u ? optionId(u.route) : null;

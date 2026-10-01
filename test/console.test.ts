@@ -110,7 +110,7 @@ test("evaluation runs are metered by the Jev daily ceiling", async () => {
   let calls = 0;
   const fetch = (async () => { calls++; return Response.json({ model: "jev-1.13.0", answers: {} }); }) as typeof globalThis.fetch;
   const understander = evalUnderstander(parseConfig({ ...live, jev: { model: "jev-1.13.0", dailyLimit: 2 } }), "k", { fetch });
-  const context = { contact: CONSOLE_CONTACT, text: "x", sentAt: epoch, timezone: "UTC", catalog: { version: "v", options: [] },
+  const context = { contact: CONSOLE_CONTACT, text: "x", sentAt: epoch, now: epoch, timezone: "UTC", catalog: { version: "v", options: [] },
     summary: [], jobs: [], turns: [], paused: "none" } as TurnContext;
   for (let n = 0; n < 3; n++) await understander.understand(context, new AbortController().signal);
   assert.equal(calls, 2);

@@ -55,13 +55,16 @@ export function localNow(at: number, timezone: string): string {
   return format(at, timezone, { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-/** Human description of `at` relative to `from`, e.g. "tomorrow (Tue, Sep 29) at 10:00 AM". */
+/**
+ * Human description of `at` relative to `from`, with its date so it stays unambiguous when read on a later day, e.g.
+ * "tomorrow (Tue, Sep 29) at 10:00 AM".
+ */
 export function describeWhen(at: number, from: number, timezone: string): string {
   const target = zoned(at, timezone); const base = zoned(from, timezone);
   const days = base.toPlainDate().until(target.toPlainDate(), { largestUnit: "days" }).days;
   const clock = clockText(at, timezone); const date = format(at, timezone, { month: "short", day: "numeric" });
   const weekday = format(at, timezone, { weekday: "short" });
-  if (days === 0) return `today at ${clock}`;
+  if (days === 0) return `today (${weekday}, ${date}) at ${clock}`;
   if (days === 1) return `tomorrow (${weekday}, ${date}) at ${clock}`;
   if (days > 1 && days < 7) return `${format(at, timezone, { weekday: "long" })} (${date}) at ${clock}`;
   return target.year === base.year ? `${weekday}, ${date} at ${clock}` : `${weekday}, ${date}, ${target.year} at ${clock}`;

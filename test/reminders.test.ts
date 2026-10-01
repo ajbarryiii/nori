@@ -218,7 +218,7 @@ test("conversational interpret extracts details and code resolves the time", asy
     { kind: "remind", title: "call mom", dueAt: at("2026-09-29T16:00:00Z") });
   assert.equal(requests.length, 1);
   assert.equal(requests[0]!.schema, EXTRACT_SCHEMA);
-  assert.match(requests[0]!.data, /#4 stretch \(reminder today at 1:00 PM\)/);
+  assert.match(requests[0]!.data, /#4 stretch \(reminder today \(Mon, Sep 28\) at 1:00 PM\)/);
   assert.match(requests[0]!.instructions, /time/);
 });
 
@@ -274,7 +274,7 @@ test("describe gives the code-written account a contact can confirm", () => {
   assert.deepEqual(plugin.describe!({ kind: "note", title: "buy milk" }, ctx), { description: "save the note “buy milk”", times: [] });
   assert.deepEqual(plugin.describe!({ kind: "done", id: 2 }, ctx), { description: "mark #2 “call mom” as done", times: [] });
   assert.deepEqual(plugin.describe!({ kind: "snooze", id: 1, minutes: 20 }, ctx),
-    { description: "snooze #1 “stretch” until today at 9:20 AM", times: [epoch + 20 * 60_000] });
+    { description: "snooze #1 “stretch” until today (Mon, Sep 28) at 9:20 AM", times: [epoch + 20 * 60_000] });
   assert.deepEqual(plugin.describe!({ kind: "done", id: null }, ctx), { description: "ask which reminder you mean", times: [] });
   assert.deepEqual(plugin.describe!({ kind: "list" }, ctx), { description: "show your active reminders", times: [] });
 });
