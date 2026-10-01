@@ -318,3 +318,12 @@ test("describe shortens a long title so the account stays within its limit", () 
     assert.match(description, /y…/);
   }
 });
+
+test("missing fields count only when the chosen action needs them", async () => {
+  const items = [item(1, "stretch", epoch)];
+  assert.deepEqual(await interpret("finished stretching!", extraction({ action: "done", task_id: 1, when: null, missing: ["time"] }), items),
+    { kind: "done", id: 1 });
+  assert.deepEqual(await interpret("jot down milk", extraction({ action: "note", title: "milk", when: null, missing: ["time"] })), { kind: "note", title: "milk" });
+  assert.deepEqual(await interpret("what's on there", extraction({ action: "list", title: null, when: null, missing: ["time", "task"] })), { kind: "list" });
+  assert.match((await interpret("later", extraction({ action: "snooze", task_id: 1, when: null, missing: ["time"] }), items) as { clarify: string }).clarify, /When/);
+});

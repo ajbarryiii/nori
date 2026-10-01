@@ -99,10 +99,10 @@ const INSTRUCTIONS = [
   "  - For a duration (\"in 20 minutes\"), use kind \"in\" with amount and unit (minutes, hours, days).",
   "  - For a clock time, use kind \"at\" with day, hour (0-23), and minute. day is today, tomorrow, a lowercase weekday name, or YYYY-MM-DD. Name the weekday instead of working out its date.",
   "  - For vague times, pick a sensible time: morning 9:00, noon or lunch 12:00, afternoon 15:00, evening 18:00, tonight 20:00. If an hour has no am or pm, pick the reading that makes sense and comes next (at 5 usually means 17:00).",
-  "  - Null if no time is given, and add \"time\" to missing.",
+  "  - Null if no time is given; for remind or snooze, add \"time\" to missing.",
   "- task_id: the number of the existing reminder the person means, for done or snooze. Use the conversation for words like it, that, or the dentist one. Null if unsure, and add \"which_task\" to missing.",
   "- snooze_minutes: a snooze given as a duration, in minutes.",
-  "- missing: what Nori would need to ask. Empty if nothing is missing.",
+  "- missing: what Nori would need to ask for the chosen action only. Empty if nothing is missing.",
   "If Nori just asked a question in the conversation, the message is probably the answer to it: combine them.",
   "Each conversation line shows when it was sent. Read relative words like tomorrow from the message they appear in: when that is an earlier message, give day as the YYYY-MM-DD date they meant.",
   "<data> lists the person's active reminders and notes by number.",
@@ -134,7 +134,10 @@ export function decodeProposal(value: unknown): Proposal | null {
 /** Validates a proposal against the contact's reminders. Only the returned command can run. */
 function resolveProposal(proposal: Proposal, ctx: PluginContext): Command | Clarification {
   const ask = (missing: Missing): Clarification => ({ clarify: QUESTIONS[missing] });
-  const first = (["which_task", "task", "time"] as const).find(x => proposal.missing.includes(x));
+  // Only what the chosen action needs can be missing; a stray flag for another field is ignored.
+  const needs: Record<Proposal["action"], readonly Missing[]> = { remind: ["task", "time"], note: ["task"], done: ["which_task"],
+    snooze: ["which_task", "time"], list: [], none: [] };
+  const first = (["which_task", "task", "time"] as const).find(x => needs[proposal.action].includes(x) && proposal.missing.includes(x));
   if (first) return ask(first);
   const title = proposal.title && proposal.title.length <= MAX_TITLE ? proposal.title : null;
   switch (proposal.action) {

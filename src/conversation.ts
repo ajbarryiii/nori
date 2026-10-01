@@ -6,9 +6,12 @@ import { clockText, localNow, localStamp, mentionsClock, mentionsDate, mentionsD
 
 const MAX_REPLY = 700;
 /** Day and duration words whose meaning depends on when a reply is read. */
-const RELATIVE = new RegExp("\\b(?:today|tonight|tomorrow|yesterday|this (?:morning|afternoon|evening|week|weekend)|next (?:week|weekend|month|year)"
-  + "|half an hour|in (?:a|an|\\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve|twenty|thirty|a few|a couple(?: of)?|several)"
-  + " (?:minutes?|mins?|hours?|hrs?|days?|weeks?|months?))\\b", "i");
+const NUMBER_WORDS = "a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen"
+  + "|nineteen|twenty|thirty|forty|fifty|sixty|ninety|half|few|couple|several|some";
+/** A quantity of time ("in 1.5 hours", "eleven hours", "a two-hour wait", "90 mins"): its meaning depends on when it is read. */
+const DURATION = new RegExp(`(?:\\d+(?:[.,]\\d+)?|\\b(?:${NUMBER_WORDS}))(?:[\\s-]+(?:${NUMBER_WORDS}|of|and))*[\\s-]*`
+  + "(?:minutes?|mins?|hours?|hrs?|days?|weeks?|months?)\\b", "i");
+const RELATIVE = new RegExp("\\b(?:today|tonight|tomorrow|yesterday|this (?:morning|afternoon|evening|week|weekend)|next (?:week|weekend|month|year))\\b", "i");
 /** Conversational options the engine itself can change state for; plugins are the others that act. */
 const ENGINE_CHANGES = new Set(["pause", "resume", "cancel"]);
 
@@ -83,7 +86,7 @@ function carriesFacts(text: string, draft: Draft, c: TurnContext): boolean {
   }
   // A reply may be read on a later day than it was written, so a stated time carries its date and no relative day. And it
   // may name no time, date, or weekday that code did not commit, so chat names none.
-  if (RELATIVE.test(text)) return false;
+  if (RELATIVE.test(text) || DURATION.test(text)) return false;
   if (!statesOnly(text, draft.times, c.timezone)) return false;
   return draft.times.every(at => mentionsClock(text, at, c.timezone) && mentionsDate(text, at, c.timezone, c.now) && mentionsDay(text, at, c.now, c.timezone));
 }
