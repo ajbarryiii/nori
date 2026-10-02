@@ -1,6 +1,6 @@
 # Nori
 
-A personal assistant designed around ADHD: easy capture, a clear next step, useful reminders, and a gentle way to restart.
+A personal assistant built for easy capture, a clear next step, useful reminders, and a gentle way to restart.
 
 You text Nori over iMessage. It keeps a local task list, reminds you when things are due, and can hand bigger requests to Codex as jobs, asking you before anything risky. Anything it can't handle is kept as a job instead of guessed at.
 
